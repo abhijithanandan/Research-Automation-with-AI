@@ -1,0 +1,15 @@
+#!/usr/bin/env sh
+# Pre-push hook — heavier checks that the CI will run anyway. Local short-circuit.
+# Skip with `git push --no-verify` only if you know what you're doing.
+
+set -e
+
+echo "→ frontend typecheck"
+npm --prefix frontend run typecheck
+
+echo "→ backend lint"
+if [ -d backend/.venv ]; then
+  # shellcheck disable=SC1091
+  . backend/.venv/bin/activate
+fi
+( cd backend && ruff check . )

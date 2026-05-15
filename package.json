@@ -1,0 +1,39 @@
+{
+  "name": "researchflow-ai-monorepo",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Repo-root tooling for ResearchFlow AI. Husky + lint-staged + commitlint hooks live here so they fire on every commit across backend + frontend.",
+  "scripts": {
+    "prepare": "husky",
+    "lint:frontend": "npm --prefix frontend run lint",
+    "typecheck:frontend": "npm --prefix frontend run typecheck",
+    "lint:backend": "cd backend && ruff check .",
+    "format:backend": "cd backend && ruff format .",
+    "typecheck:backend": "cd backend && mypy app",
+    "lint": "npm run lint:frontend && npm run lint:backend",
+    "format:check": "npm --prefix frontend exec prettier -- --check . && cd backend && ruff format --check ."
+  },
+  "devDependencies": {
+    "husky": "^9.1.0",
+    "lint-staged": "^15.2.0",
+    "@commitlint/cli": "^19.4.0",
+    "@commitlint/config-conventional": "^19.4.0",
+    "prettier": "^3.3.0"
+  },
+  "lint-staged": {
+    "frontend/**/*.{ts,tsx,js,jsx}": [
+      "npm --prefix frontend exec prettier -- --write",
+      "npm --prefix frontend exec eslint -- --fix --no-warn-ignored"
+    ],
+    "frontend/**/*.{json,css,md}": [
+      "npm --prefix frontend exec prettier -- --write"
+    ],
+    "backend/**/*.py": [
+      "bash -c 'cd backend && ruff check --fix --force-exclude'",
+      "bash -c 'cd backend && ruff format --force-exclude'"
+    ],
+    "*.{md,yml,yaml,json}": [
+      "npm --prefix frontend exec prettier -- --write"
+    ]
+  }
+}

@@ -1,0 +1,5 @@
+#!/usr/bin/env sh
+# Pre-commit hook — runs lint-staged on the files you've staged.
+# Failures here mean your commit is rejected; fix the reported issues and re-stage.
+
+npx --no-install lint-staged
