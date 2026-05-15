@@ -1,0 +1,326 @@
+openapi: 3.1.0
+info:
+  title: ResearchFlow AI — Remote Engine
+  version: 0.1.0
+  description: |
+    HITL multi-agent research automation. This file is the machine-readable
+    source of truth for the REST contract. Keep in sync with SPEC.md §3.
+  license:
+    name: MIT
+servers:
+  - url: http://localhost:8000/api/v1
+    description: Local dev
+security:
+  - bearerAuth: []
+paths:
+  /health:
+    get:
+      tags: [meta]
+      summary: Liveness probe
+      security: []
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status, version]
+                properties:
+                  status: { type: string }
+                  version: { type: string }
+  /meta/providers:
+    get:
+      tags: [meta]
+      summary: List LLM providers
+      security: []
+      responses:
+        "200":
+          description: OK
+  /projects:
+    get:
+      tags: [projects]
+      summary: List my projects
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/Project" }
+    post:
+      tags: [projects]
+      summary: Create a project
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [title, seed_query]
+              properties:
+                title: { type: string, minLength: 1, maxLength: 200 }
+                seed_query: { type: string, minLength: 1, maxLength: 1000 }
+                output_format: { type: string, enum: [markdown, latex] }
+                token_cap_usd: { type: number }
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Project" }
+  /projects/{id}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+    get:
+      tags: [projects]
+      summary: Get project
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Project" }
+    patch:
+      tags: [projects]
+      summary: Update project
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                title: { type: string }
+                output_format: { type: string }
+                token_cap_usd: { type: number }
+      responses:
+        "200":
+          description: OK
+    delete:
+      tags: [projects]
+      summary: Archive project
+      responses:
+        "204": { description: Archived }
+  /projects/{id}/workflow/start:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+    post:
+      tags: [workflow]
+      summary: Start or resume the workflow
+      responses:
+        "200": { description: OK }
+  /projects/{id}/workflow:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+    get:
+      tags: [workflow]
+      summary: Get current workflow state
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/WorkflowRun" }
+  /projects/{id}/workflow/approve:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+    post:
+      tags: [workflow]
+      summary: Approve the pending phase
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                feedback: { type: string, nullable: true }
+      responses:
+        "200": { description: OK }
+        "409":
+          $ref: "#/components/responses/PhaseLocked"
+  /projects/{id}/workflow/reject:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+    post:
+      tags: [workflow]
+      summary: Reject and request regeneration
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [feedback]
+              properties:
+                feedback: { type: string }
+      responses:
+        "200": { description: OK }
+  /projects/{id}/workflow/override:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+    post:
+      tags: [workflow]
+      summary: Submit a manually-edited artifact
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [artifact_kind, label, content]
+              properties:
+                artifact_kind: { type: string }
+                label: { type: string }
+                content: { type: string }
+                mime_type: { type: string, default: text/markdown }
+      responses:
+        "200": { description: OK }
+  /projects/{id}/papers:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+    get:
+      tags: [papers]
+      summary: List papers in the candidate + approved pool
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/Paper" }
+  /projects/{id}/artifacts:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+      - name: kind
+        in: query
+        required: false
+        schema: { type: string }
+    get:
+      tags: [artifacts]
+      summary: List artifacts
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/Artifact" }
+  /projects/{id}/export:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+      - name: format
+        in: query
+        required: false
+        schema: { type: string, enum: [markdown, latex, bibtex] }
+    get:
+      tags: [artifacts]
+      summary: Export the manuscript
+      responses:
+        "200": { description: OK }
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: Firebase ID token
+  responses:
+    PhaseLocked:
+      description: Workflow is not in an approvable state.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ApiError" }
+  schemas:
+    Project:
+      type: object
+      required: [id, owner_id, title, seed_query, status, current_phase, created_at, updated_at]
+      properties:
+        id: { type: string, format: uuid }
+        owner_id: { type: string, format: uuid }
+        title: { type: string }
+        seed_query: { type: string }
+        output_format: { type: string, enum: [markdown, latex] }
+        token_cap_usd: { type: number }
+        status: { type: string, enum: [draft, active, completed, archived] }
+        current_phase: { type: string, enum: [discovery, synthesis, analysis, drafting, done] }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+    WorkflowRun:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        project_id: { type: string, format: uuid }
+        phase: { type: string }
+        state: { type: string, enum: [running, awaiting_approval, approved, rejected, error] }
+        checkpoint_id: { type: string }
+        started_at: { type: string, format: date-time }
+        awaiting_since: { type: string, format: date-time, nullable: true }
+        last_event_at: { type: string, format: date-time }
+    Paper:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        project_id: { type: string, format: uuid }
+        source: { type: string, enum: [semantic_scholar, arxiv, crossref, upload] }
+        external_id: { type: string }
+        title: { type: string }
+        authors:
+          type: array
+          items: { type: string }
+        year: { type: integer, nullable: true }
+        abstract: { type: string, nullable: true }
+        pdf_url: { type: string, nullable: true }
+        citation_key: { type: string }
+        approved: { type: boolean }
+        added_at: { type: string, format: date-time }
+    Artifact:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        project_id: { type: string, format: uuid }
+        kind: { type: string, enum: [matrix, summary, section, figure, code, log] }
+        label: { type: string }
+        content: { type: string }
+        mime_type: { type: string }
+        produced_by: { type: string, enum: [librarian, critic, analyst, scribe, human] }
+        parent_id: { type: string, format: uuid, nullable: true }
+        created_at: { type: string, format: date-time }
+    ApiError:
+      type: object
+      properties:
+        error:
+          type: object
+          properties:
+            code: { type: string }
+            message: { type: string }
+            trace_id: { type: string }
