@@ -33,8 +33,17 @@ class Settings(BaseSettings):
     firebase_credentials_path: str = ""
     firebase_credentials_json: str = ""
 
+    # Set to True in local dev to skip Firebase token verification.
+    # Never enable in staging or production.
+    dev_auth_bypass: bool = False
+
+    # Optional Semantic Scholar API key (increases rate limits).
+    semantic_scholar_api_key: str = ""
+
     default_token_cap_usd: float = 5.0
     max_paper_candidates: int = Field(default=30, ge=1, le=200)
+    # Warn when this fraction of the per-project token cap is consumed (BRD §NFR-5).
+    token_cap_warn_pct: float = Field(default=0.8, ge=0.0, le=1.0)
 
     @property
     def cors_origins_list(self) -> list[str]:

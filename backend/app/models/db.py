@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+from typing import Any
 from uuid import UUID, uuid4
 
 from sqlalchemy import JSON, ForeignKey, Numeric, String, Text
@@ -69,6 +70,7 @@ class PaperRow(Base):
     abstract: Mapped[str | None] = mapped_column(Text, nullable=True)
     pdf_url: Mapped[str | None] = mapped_column(String, nullable=True)
     citation_key: Mapped[str] = mapped_column(String)
+    citation_count: Mapped[int | None]
     approved: Mapped[bool] = mapped_column(default=False)
     added_at: Mapped[datetime]
 
@@ -103,7 +105,7 @@ class AuditLogRow(Base):
     )
     actor: Mapped[str] = mapped_column(String)
     action: Mapped[str] = mapped_column(String)
-    payload: Mapped[dict] = mapped_column(JSON)
+    payload: Mapped[dict[str, Any]] = mapped_column(JSON)
     model: Mapped[str | None] = mapped_column(String, nullable=True)
     tokens_in: Mapped[int | None]
     tokens_out: Mapped[int | None]

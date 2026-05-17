@@ -60,6 +60,7 @@ class Paper(BaseModel):
     abstract: str | None = None
     pdf_url: HttpUrl | None = None
     citation_key: str
+    citation_count: int | None = None
     approved: bool = False
     added_at: datetime
 

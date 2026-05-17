@@ -1,18 +1,34 @@
 """LangGraph workflow builder. See SPEC.md §5 for the node/edge contract.
 
-This is the *skeleton*. Implementations of each node call into `app.agents.*`
-and `app.services.*`. Approval gates use LangGraph's interrupt() semantics —
-they pause the run until an external `command` resumes them.
+Phase 1 implements:
+  - `discover` node  → calls Librarian, writes candidates to state.
+  - Interrupt before `synthesize` — the HITL gate for Phase 1 approval.
+
+Phase 2 (`synthesize`) and Phase 4 (`draft_section`) nodes remain stubs;
+the graph still compiles so the e2e flow can be validated end-to-end.
+
+Approval gates use LangGraph's `interrupt()` — the graph pauses at the
+interrupt point until an external `Command(resume=…)` is issued by the
+workflow REST endpoint.
 """
 
 from __future__ import annotations
 
 from typing import Any
 
+from langgraph.graph import END, StateGraph
+from langgraph.types import interrupt
+
+from app.agents.librarian import Librarian, LibrarianInput
 from app.graph.state import GraphState
+from app.models.schemas import Phase
+from app.utils.logging import get_logger
 
+_log = get_logger(__name__)
 
-# Node names — kept here so they're referenced symbolically, not as strings.
+# ---------------------------------------------------------------------------
+# Node name constants — always reference these, never raw strings
+# ---------------------------------------------------------------------------
 NODE_DISCOVER = "discover"
 NODE_AWAIT_POOL = "await_pool_approval"
 NODE_SYNTHESIZE = "synthesize"
@@ -25,51 +41,223 @@ NODE_ASSEMBLE = "assemble"
 NODE_DONE = "done"
 
 
+# ---------------------------------------------------------------------------
+# Node implementations
+# ---------------------------------------------------------------------------
+
+
 async def node_discover(state: GraphState) -> GraphState:
-    # TODO: call app.agents.librarian.Librarian.run; populate state["candidates"].
-    return {**state, "awaiting_approval": True}
+    """Run the Librarian agent and populate `candidates` in the state.
+
+    Emitting `agent.started` / `agent.completed` WebSocket events is handled
+    by the WS event bus (wired in the workflow service layer). The node itself
+    only mutates state — it has no I/O side effects beyond the LLM + HTTP calls
+    encapsulated inside the Librarian.
+    """
+    _log.info(
+        "node_discover_start",
+        project_id=str(state.get("project_id")),
+    )
+
+    librarian = Librarian()
+    result = await librarian.run(
+        LibrarianInput(
+            seed_query=state.get("seed_query", ""),  # type: ignore[arg-type]
+            project_id=state.get("project_id"),
+        )
+    )
+
+    _log.info("node_discover_done", candidate_count=len(result.candidates))
+
+    return {
+        **state,
+        "phase": Phase.DISCOVERY,
+        "candidates": result.candidates,
+        "expanded_queries": result.expanded_queries,  # type: ignore[typeddict-item]
+        "awaiting_approval": False,  # gate node sets this
+    }
+
+
+async def node_await_pool_approval(state: GraphState) -> GraphState:
+    """HITL gate for Phase 1.
+
+    Persists a checkpoint, then issues an interrupt. The graph is suspended
+    here until the `/workflow/approve` (or /reject) endpoint resumes it with
+    a `Command`. This satisfies SPEC.md §5.3 gate invariants — the checkpoint
+    is written *before* the interrupt is emitted.
+    """
+    _log.info("gate_pool_approval_waiting", project_id=str(state.get("project_id")))
+
+    # `interrupt()` raises `GraphInterrupt` internally — LangGraph persists
+    # the checkpoint before raising, then re-enters this node with the
+    # resume value when the graph is commanded to continue.
+    approval = interrupt(
+        {
+            "phase": Phase.DISCOVERY,
+            "message": "Review and approve the candidate paper pool.",
+        }
+    )
+
+    # On resume, `approval` carries the action string: "approve" | "reject".
+    if approval == "reject":
+        _log.info("gate_pool_rejected", project_id=str(state.get("project_id")))
+        return {**state, "awaiting_approval": False}  # re-enters discover
+
+    _log.info("gate_pool_approved", project_id=str(state.get("project_id")))
+    return {**state, "awaiting_approval": False}
 
 
 async def node_synthesize(state: GraphState) -> GraphState:
-    # TODO: call Critic; populate matrix + summary.
-    return {**state, "awaiting_approval": True}
+    """Phase 2 stub — Critic agent (implemented in v0.1 Phase 2 PR)."""
+    _log.info("node_synthesize_stub", project_id=str(state.get("project_id")))
+    return {**state, "phase": Phase.SYNTHESIS, "awaiting_approval": True}
 
 
 async def node_draft_section(state: GraphState) -> GraphState:
-    # TODO: call Scribe for state["sections_remaining"][0].
-    return {**state, "awaiting_approval": True}
+    """Phase 4 stub — Scribe agent (implemented in Phase 4 PR)."""
+    _log.info("node_draft_section_stub", project_id=str(state.get("project_id")))
+    remaining = list(state.get("sections_remaining", []))
+    if remaining:
+        remaining.pop(0)
+    return {
+        **state,
+        "phase": Phase.DRAFTING,
+        "sections_remaining": remaining,
+        "awaiting_approval": True,
+    }
 
 
 async def node_assemble(state: GraphState) -> GraphState:
-    # TODO: concatenate drafts + bibliography into a final manuscript artifact.
+    """Assembles all sections into a final manuscript artifact (Phase 4)."""
+    _log.info("node_assemble_stub", project_id=str(state.get("project_id")))
     return state
 
 
-def build_graph() -> Any:
-    """Construct the LangGraph state machine.
+# ---------------------------------------------------------------------------
+# Edge routing helpers
+# ---------------------------------------------------------------------------
 
-    Pseudocode (real implementation pending):
 
-        from langgraph.graph import StateGraph, END
+def _route_after_pool(state: GraphState) -> str:
+    """After the approval gate, decide where to go.
 
-        g = StateGraph(GraphState)
-        g.add_node(NODE_DISCOVER, node_discover)
-        g.add_node(NODE_SYNTHESIZE, node_synthesize)
-        g.add_node(NODE_DRAFT, node_draft_section)
-        g.add_node(NODE_ASSEMBLE, node_assemble)
-
-        g.set_entry_point(NODE_DISCOVER)
-        g.add_edge(NODE_DISCOVER, NODE_SYNTHESIZE)  # gate via interrupt_before
-        g.add_edge(NODE_SYNTHESIZE, NODE_DRAFT)     # gate via interrupt_before
-        g.add_conditional_edges(NODE_DRAFT, _route_after_section, {
-            "next_section": NODE_DRAFT,
-            "assemble": NODE_ASSEMBLE,
-        })
-        g.add_edge(NODE_ASSEMBLE, END)
-
-        return g.compile(
-            checkpointer=postgres_saver,
-            interrupt_before=[NODE_SYNTHESIZE, NODE_DRAFT, NODE_ASSEMBLE],
-        )
+    If the gate was rejected (last_feedback present and no approved papers),
+    loop back to discover. Otherwise advance to synthesize.
     """
-    raise NotImplementedError("build_graph: implement when LangGraph wiring is finalized")
+    # If rejected the gate node returns awaiting_approval=False without
+    # advancing the phase — we detect that and re-run discover.
+    if state.get("last_feedback") and not state.get("approved_pool"):
+        return NODE_DISCOVER
+    return NODE_SYNTHESIZE
+
+
+def _route_after_section(state: GraphState) -> str:
+    remaining = state.get("sections_remaining", [])
+    if remaining:
+        return NODE_DRAFT
+    return NODE_ASSEMBLE
+
+
+# ---------------------------------------------------------------------------
+# State graph definition
+# ---------------------------------------------------------------------------
+
+
+class AgentState(TypedDict):
+    project_id: UUID
+    seed_query: str
+    candidates: list[Paper]
+    feedback: str | None
+
+
+class WorkflowGraph:
+    """Encapsulates the LangGraph state machine builder."""
+
+    `checkpointer` must be an AsyncPostgresSaver (or MemorySaver for tests).
+    The caller (lifespan hook or workflow service) is responsible for
+    initialising and closing the checkpointer connection pool.
+
+
+# ---------------------------------------------------------------------------
+# Graph builder
+# ---------------------------------------------------------------------------
+
+
+def build_graph(checkpointer: Any) -> Any:
+    """Construct and compile the LangGraph state machine.
+
+    `checkpointer` must be an AsyncPostgresSaver (or MemorySaver for tests).
+    The caller (lifespan hook or workflow service) is responsible for
+    initialising and closing the checkpointer connection pool.
+
+    Phase 1 interrupts before `NODE_SYNTHESIZE` — the graph pauses there
+    after `node_await_pool_approval` hands control to LangGraph's interrupt
+    mechanism.
+    """
+    g: StateGraph = StateGraph(GraphState)
+
+    # Register nodes
+    g.add_node(NODE_DISCOVER, node_discover)
+    g.add_node(NODE_AWAIT_POOL, node_await_pool_approval)
+    g.add_node(NODE_SYNTHESIZE, node_synthesize)
+    g.add_node(NODE_DRAFT, node_draft_section)
+    g.add_node(NODE_ASSEMBLE, node_assemble)
+
+    # Entry point
+    g.set_entry_point(NODE_DISCOVER)
+
+    # discover → await_pool_approval (always)
+    g.add_edge(NODE_DISCOVER, NODE_AWAIT_POOL)
+
+    # await_pool_approval → synthesize or back to discover
+    g.add_conditional_edges(
+        NODE_AWAIT_POOL,
+        _route_after_pool,
+        {NODE_SYNTHESIZE: NODE_SYNTHESIZE, NODE_DISCOVER: NODE_DISCOVER},
+    )
+
+    # synthesize → draft_section (Phase 2 gate handled inside synthesize stub)
+    g.add_edge(NODE_SYNTHESIZE, NODE_DRAFT)
+
+    # draft_section → next section or assemble
+    g.add_conditional_edges(
+        NODE_DRAFT,
+        _route_after_section,
+        {NODE_DRAFT: NODE_DRAFT, NODE_ASSEMBLE: NODE_ASSEMBLE},
+    )
+
+    g.add_edge(NODE_ASSEMBLE, END)
+
+    # Compile — interrupt_before NODE_AWAIT_POOL so the checkpoint is saved
+    # before the gate is reached (satisfies SPEC §5.3 invariant 1).
+    compiled = g.compile(
+        checkpointer=checkpointer,
+        interrupt_before=[NODE_AWAIT_POOL],
+    )
+    return compiled
+
+
+# ---------------------------------------------------------------------------
+# Checkpointer factory (used by the lifespan hook and tests)
+# ---------------------------------------------------------------------------
+
+
+async def create_postgres_checkpointer(
+    database_url: str,
+) -> Any:
+    """Create an AsyncPostgresSaver connected to the given Postgres URL.
+
+    Import is deferred here so that modules importing `workflow.py` don't
+    trigger psycopg's libpq requirement at collection time (e.g. during tests
+    that use MemorySaver).
+
+    The caller must call `.setup()` once on first run to create the
+    langgraph_checkpoints table, then ensure `.aclose()` on shutdown.
+    """
+    # Late import — psycopg needs libpq installed system-wide.
+    from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
+
+    # AsyncPostgresSaver uses psycopg3 connection strings (not asyncpg).
+    pg_url = database_url.replace("postgresql+asyncpg://", "postgresql://")
+    saver = AsyncPostgresSaver.from_conn_string(pg_url)
+    return saver

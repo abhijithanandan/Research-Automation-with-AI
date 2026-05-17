@@ -2,14 +2,14 @@
 
 from __future__ import annotations
 
-from contextlib import asynccontextmanager
 from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app import __version__
-from app.api.routes import health, projects, workflow, papers, artifacts, websocket
+from app.api.routes import artifacts, health, papers, projects, websocket, workflow
 from app.config import get_settings
 from app.utils.logging import configure_logging
 
@@ -18,9 +18,40 @@ from app.utils.logging import configure_logging
 async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     settings = get_settings()
     configure_logging(settings.log_level)
-    # TODO: open db pool, init vector store client, warm LLM gateway.
+
+    import structlog
+
+    from app.graph.workflow import create_postgres_checkpointer
+    from app.services.workflow import init_graph
+
+    _log = structlog.get_logger(__name__)
+    checkpointer = None
+
+    try:
+        checkpointer = await create_postgres_checkpointer(settings.database_url)
+        await checkpointer.setup()  # creates langgraph_checkpoints table if absent
+        _log.info("checkpointer_postgres_ready")
+    except Exception as exc:
+        # Postgres unavailable (no Docker in dev) — fall back to in-memory checkpointer.
+        # WARNING: state is lost on restart. Never use in production.
+        from langgraph.checkpoint.memory import MemorySaver
+
+        checkpointer = MemorySaver()
+        _log.warning(
+            "checkpointer_fallback_memory",
+            reason=str(exc),
+            hint="Start Docker (docker compose up postgres) for persistent state.",
+        )
+
+    await init_graph(checkpointer)
+
     yield
-    # TODO: close db pool, flush logs.
+
+    if hasattr(checkpointer, "aclose"):
+        await checkpointer.aclose()
+    from app.db.session import dispose_engine
+
+    await dispose_engine()
 
 
 def create_app() -> FastAPI:

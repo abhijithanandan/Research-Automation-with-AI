@@ -11,7 +11,6 @@ from pydantic import BaseModel
 from app.agents.base import Agent
 from app.models.schemas import Artifact, Paper
 
-
 SectionName = Literal[
     "abstract",
     "introduction",

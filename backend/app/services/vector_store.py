@@ -6,13 +6,9 @@ from typing import Protocol
 
 
 class VectorStore(Protocol):
-    async def upsert(
-        self, namespace: str, documents: list[dict[str, object]]
-    ) -> None: ...
+    async def upsert(self, namespace: str, documents: list[dict[str, object]]) -> None: ...
 
-    async def query(
-        self, namespace: str, query: str, k: int = 10
-    ) -> list[dict[str, object]]: ...
+    async def query(self, namespace: str, query: str, k: int = 10) -> list[dict[str, object]]: ...
 
 
 class ChromaVectorStore:
@@ -25,8 +21,6 @@ class ChromaVectorStore:
         _ = namespace, documents
         raise NotImplementedError
 
-    async def query(
-        self, namespace: str, query: str, k: int = 10
-    ) -> list[dict[str, object]]:
+    async def query(self, namespace: str, query: str, k: int = 10) -> list[dict[str, object]]:
         _ = namespace, query, k
         raise NotImplementedError

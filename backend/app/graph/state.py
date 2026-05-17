@@ -19,6 +19,10 @@ class GraphState(TypedDict, total=False):
     workflow_run_id: UUID
     phase: Phase
 
+    # Discovery inputs / outputs
+    seed_query: str
+    expanded_queries: list[str]
+
     # Phase 1
     candidates: list[Paper]
     approved_pool: list[Paper]

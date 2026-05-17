@@ -301,6 +301,7 @@ components:
         abstract: { type: string, nullable: true }
         pdf_url: { type: string, nullable: true }
         citation_key: { type: string }
+        citation_count: { type: integer, nullable: true }
         approved: { type: boolean }
         added_at: { type: string, format: date-time }
     Artifact:

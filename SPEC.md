@@ -89,6 +89,7 @@ class Paper(BaseModel):
     abstract: str | None
     pdf_url: HttpUrl | None
     citation_key: str           # BibTeX key — unique within project
+    citation_count: int | None
     approved: bool = False
     added_at: datetime
 
@@ -165,6 +166,7 @@ CREATE TABLE papers (
     abstract TEXT,
     pdf_url TEXT,
     citation_key TEXT NOT NULL,
+    citation_count INT,
     approved BOOLEAN NOT NULL DEFAULT FALSE,
     added_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     UNIQUE (project_id, citation_key)

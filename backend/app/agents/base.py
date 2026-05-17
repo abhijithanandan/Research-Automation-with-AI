@@ -24,5 +24,4 @@ class Agent(ABC, Generic[InputT, OutputT]):
     name: str = "agent"
 
     @abstractmethod
-    async def run(self, payload: InputT) -> OutputT:
-        ...
+    async def run(self, payload: InputT) -> OutputT: ...
