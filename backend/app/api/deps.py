@@ -23,12 +23,17 @@ async def get_current_user(
     """Extract the Bearer token, verify it with Firebase, and return the user.
 
     The internal user representation is a lightweight schema object. Full DB
-oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token")
+    resolution (upsert users table) is deferred to the routes that need it;
+    the auth dependency just validates identity.
+    """
+    if not authorization or not authorization.lower().startswith("bearer "):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Missing or malformed Authorization header",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
 
-
-async def get_current_user(token: str = Depends(oauth2_scheme)) -> User:
-    """Validate Firebase token and return/create the user."""
-    from app.services.auth import verify_firebase_token
+    token = authorization[7:]  # strip "Bearer "
 
     try:
         claims = await verify_firebase_token(token)
@@ -43,9 +48,7 @@ async def get_current_user(token: str = Depends(oauth2_scheme)) -> User:
     email: str = str(claims.get("email", f"{uid}@unknown"))
 
     return User(
-        # Stable UUID derived from firebase_uid — avoids a DB round-trip in the
-        # auth dependency itself. The projects route handles the upsert.
-        id=UUID(int=int.from_bytes(uid.encode()[:16].ljust(16, b"\x00"), "big")),
+        id=_stable_uuid_from_uid(uid),
         email=email,
         display_name=str(claims.get("name")) if claims.get("name") else None,
         created_at=datetime.now(tz=UTC),
@@ -55,12 +58,10 @@ async def get_current_user(token: str = Depends(oauth2_scheme)) -> User:
 CurrentUser = Annotated[User, Depends(get_current_user)]
 
 
-# ---------------------------------------------------------------------------
-# DB session dependency (wired once sessions are needed in routes)
-# ---------------------------------------------------------------------------
+from collections.abc import AsyncIterator
 
 
-async def get_db_session():  # type: ignore[return]  # yielded, not returned
+async def get_db_session() -> AsyncIterator[AsyncSession]:
     """Yield an async SQLAlchemy session. Import lazily to avoid circular deps."""
     from app.db.session import get_session
 

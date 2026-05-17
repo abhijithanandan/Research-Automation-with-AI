@@ -50,7 +50,9 @@ async def test_graph_pauses_after_discover() -> None:
     # Mock the Librarian so we don't hit real APIs.
     from app.agents.librarian import LibrarianOutput
 
-    mock_output = LibrarianOutput(candidates=[_mock_paper()], expanded_queries=["mock query"])
+    mock_output = LibrarianOutput(
+        candidates=[_mock_paper()], expanded_queries=["mock query"], arxiv_categories=[]
+    )
 
     with patch("app.graph.workflow.Librarian") as MockLibrarian:
         MockLibrarian.return_value.run = AsyncMock(return_value=mock_output)
@@ -92,7 +94,9 @@ async def test_graph_advances_on_approve() -> None:
 
     from app.agents.librarian import LibrarianOutput
 
-    mock_output = LibrarianOutput(candidates=[_mock_paper()], expanded_queries=[])
+    mock_output = LibrarianOutput(
+        candidates=[_mock_paper()], expanded_queries=[], arxiv_categories=[]
+    )
 
     with patch("app.graph.workflow.Librarian") as MockLibrarian:
         MockLibrarian.return_value.run = AsyncMock(return_value=mock_output)

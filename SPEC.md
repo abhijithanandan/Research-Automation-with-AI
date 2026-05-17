@@ -397,6 +397,7 @@ class LibrarianInput(BaseModel):
 class LibrarianOutput(BaseModel):
     candidates: list[Paper]    # not yet approved
     expanded_queries: list[str]
+    arxiv_categories: list[str]  # e.g. ["cs.CV", "cs.LG"] — used for targeted ArXiv queries
 ```
 
 ### 6.2 Critic
@@ -476,4 +477,4 @@ These are blocking decisions for the team. Resolve before implementation begins.
 1. **Streaming format:** raw LLM token deltas vs. semantic chunk events. (Recommendation: raw deltas; UI assembles.)
 2. **Checkpoint backend:** Postgres-only, or layered with Redis for in-flight runs?
 3. **Auth at the WS layer:** first-message handshake (current spec) or `Sec-WebSocket-Protocol` token? (Current spec chosen because Firebase tokens are long.)
-4. **Citation key collision:** when two papers in the pool share an obvious BibTeX key (e.g. `smith2020`), the spec disambiguates by appending `a`, `b`, ... — is that acceptable to faculty reviewers?
+4. ~~**Citation key collision:**~~ **RESOLVED.** The first occurrence keeps the bare key (e.g. `smith2020`); subsequent collisions receive alphabetic suffixes (`smith2020a`, `smith2020b`, …). This is enforced inside `generate_citation_keys()` in `app/services/discovery.py` and verified by `test_librarian_generates_unique_citation_keys`. Faculty reviewers accepted this convention.

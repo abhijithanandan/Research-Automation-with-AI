@@ -134,9 +134,21 @@ class ArXivAdapter:
     """Queries the ArXiv Atom Feed API (no API key required)."""
 
     @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=1, max=8))
-    async def search(self, query: str, max_results: int, client: httpx.AsyncClient) -> list[Paper]:
+    async def search(
+        self,
+        query: str,
+        max_results: int,
+        client: httpx.AsyncClient,
+        categories: list[str] | None = None,
+    ) -> list[Paper]:
+        # Build the search_query string with optional ArXiv category filters.
+        search_expr = f"all:{query}"
+        if categories:
+            cat_expr = " OR ".join(f"cat:{c}" for c in categories[:5])
+            search_expr = f"({search_expr}) AND ({cat_expr})"
+
         params: dict[str, str | int] = {
-            "search_query": f"all:{query}",
+            "search_query": search_expr,
             "max_results": min(max_results, 100),
             "sortBy": "relevance",
             "sortOrder": "descending",
@@ -229,17 +241,24 @@ class DiscoveryService:
         self,
         queries: list[str],
         max_per_source: int = 30,
+        arxiv_categories: list[str] | None = None,
     ) -> list[Paper]:
         """Search all adapters for all queries in parallel, return merged list."""
         import asyncio
 
         limits = httpx.Limits(max_connections=20, max_keepalive_connections=5)
         async with httpx.AsyncClient(follow_redirects=True, limits=limits) as client:
-            tasks = [
-                adapter.search(query, max_per_source, client)
-                for adapter in self._adapters
-                for query in queries
-            ]
+            tasks = []
+            for query in queries:
+                for adapter in self._adapters:
+                    if isinstance(adapter, ArXivAdapter):
+                        tasks.append(
+                            adapter.search(
+                                query, max_per_source, client, categories=arxiv_categories
+                            )
+                        )
+                    else:
+                        tasks.append(adapter.search(query, max_per_source, client))
             results_nested = await asyncio.gather(*tasks, return_exceptions=True)
 
         papers: list[Paper] = []

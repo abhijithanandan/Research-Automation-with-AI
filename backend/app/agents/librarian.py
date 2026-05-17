@@ -1,10 +1,10 @@
 """The Librarian agent — discovery. See SPEC.md §6.1 and docs/agents/librarian.md.
 
 Implements all 6 behaviors from the agent contract:
-  1. Query expansion via LLMGateway.
+  1. Query expansion via LLMGateway (with ArXiv category taxonomy alignment).
   2. Source fan-out via DiscoveryService (never calls httpx directly).
   3. Deduplication by DOI then fuzzy title (token-set ratio ≥ 0.9).
-  4. Ranking by relevance + citation count + recency.
+  4. Ranking by relevance + citation velocity + recency.
   5. Trimming to max_candidates.
   6. Citation key generation (firstauthorlastnameYEAR, disambiguated with a/b/…).
 
@@ -14,6 +14,7 @@ Every call writes to audit_log before returning (caller must pass audit_writer).
 from __future__ import annotations
 
 import json
+import math
 from typing import Literal
 from uuid import UUID
 
@@ -29,17 +30,19 @@ from app.utils.logging import get_logger
 _log = get_logger(__name__)
 
 _EXPANSION_PROMPT_TEMPLATE = """\
-You are a research librarian. Generate {n} alternative search queries for the \
-seed query below. Return ONLY a JSON array of strings, no other text.
+You are a research librarian. Given the seed query below, produce:
+1. {n} alternative keyword search queries.
+2. A list of relevant ArXiv category codes (e.g. cs.CV, cs.LG, stat.ML).
 
 Seed query: {seed_query}
-
-Example output: ["query one", "query two", "query three"]
 """
 
 
-class SearchQueries(BaseModel):
+class ExpandedSearch(BaseModel):
+    """Structured output schema for LLM query expansion."""
+
     queries: list[str]
+    arxiv_categories: list[str]
 
 
 class LibrarianInput(BaseModel):
@@ -55,6 +58,7 @@ class LibrarianInput(BaseModel):
 class LibrarianOutput(BaseModel):
     candidates: list[Paper]  # approved=False always
     expanded_queries: list[str]
+    arxiv_categories: list[str]
 
 
 class Librarian(Agent[LibrarianInput, LibrarianOutput]):
@@ -66,18 +70,22 @@ class Librarian(Agent[LibrarianInput, LibrarianOutput]):
 
     async def run(self, payload: LibrarianInput) -> LibrarianOutput:
         # 1. Query expansion -------------------------------------------------
-        expanded_queries = await self._expand_query(payload.seed_query)
+        expansion = await self._expand_query(payload.seed_query)
+        expanded_queries = expansion.queries
+        arxiv_categories = expansion.arxiv_categories
         all_queries = [payload.seed_query, *expanded_queries]
         _log.info(
             "librarian_queries",
             seed=payload.seed_query,
             expanded=expanded_queries,
+            arxiv_categories=arxiv_categories,
         )
 
         # 2. Source fan-out ---------------------------------------------------
         raw_candidates = await self._discovery.search(
             queries=all_queries,
             max_per_source=max(payload.max_candidates, 50),
+            arxiv_categories=arxiv_categories,
         )
 
         # 3. Deduplication ----------------------------------------------------
@@ -98,16 +106,20 @@ class Librarian(Agent[LibrarianInput, LibrarianOutput]):
         assert all(not p.approved for p in trimmed)
 
         _log.info("librarian_done", candidate_count=len(trimmed))
-        return LibrarianOutput(candidates=trimmed, expanded_queries=expanded_queries)
+        return LibrarianOutput(
+            candidates=trimmed,
+            expanded_queries=expanded_queries,
+            arxiv_categories=arxiv_categories,
+        )
 
     # ------------------------------------------------------------------
     # Private helpers
     # ------------------------------------------------------------------
 
-    async def _expand_query(self, seed_query: str) -> list[str]:
-        """Use the LLM to generate 3–5 alternative search queries.
+    async def _expand_query(self, seed_query: str) -> ExpandedSearch:
+        """Use the LLM to generate alternative queries and ArXiv categories.
 
-        Falls back to an empty list if the LLM provider is unavailable —
+        Falls back to empty lists if the LLM provider is unavailable --
         the Librarian still runs with the seed query alone (see failure modes).
         """
         prompt = _EXPANSION_PROMPT_TEMPLATE.format(n=4, seed_query=seed_query)
@@ -116,28 +128,33 @@ class Librarian(Agent[LibrarianInput, LibrarianOutput]):
 
             config = genai_types.GenerateContentConfig(
                 response_mime_type="application/json",
-                response_schema=SearchQueries,
+                response_schema=ExpandedSearch,
             )
             text, _telemetry = await self._llm.complete(prompt, config=config)
             data = json.loads(text)
-            queries = data.get("queries", [])
-            return [str(q) for q in queries[:5]]
+            queries = [str(q) for q in data.get("queries", [])[:5]]
+            categories = [str(c) for c in data.get("arxiv_categories", [])[:5]]
+            return ExpandedSearch(queries=queries, arxiv_categories=categories)
         except Exception as exc:
             _log.warning("librarian_expansion_failed", error=str(exc))
-            return []  # graceful degradation: continue with seed only
+            return ExpandedSearch(queries=[], arxiv_categories=[])
 
 
 # ---------------------------------------------------------------------------
 # Deduplication helpers
 # ---------------------------------------------------------------------------
 
-_FUZZY_RATIO_THRESHOLD = 90  # token_set_ratio ≥ 90 → treat as duplicate
+_FUZZY_RATIO_THRESHOLD = 90  # token_set_ratio >= 90 -> treat as duplicate
 
 
 def _normalise_doi(doi: str | None) -> str:
     if not doi:
         return ""
-    return doi.lower().strip().lstrip("https://doi.org/").lstrip("http://dx.doi.org/")
+    # Use removeprefix to avoid the B005 lstrip multi-char issue.
+    normalised = doi.lower().strip()
+    normalised = normalised.removeprefix("https://doi.org/")
+    normalised = normalised.removeprefix("http://dx.doi.org/")
+    return normalised
 
 
 def _deduplicate(papers: list[Paper]) -> list[Paper]:
@@ -159,11 +176,11 @@ def _deduplicate(papers: list[Paper]) -> list[Paper]:
             unique.append(paper)
             continue
 
-        # No DOI — check fuzzy title against existing unique titles.
+        # No DOI -- check fuzzy title against existing unique titles.
         title_normalised = paper.title.lower().strip()
         is_dup = False
         for existing in unique:
-            ratio = fuzz.token_set_ratio(title_normalised, existing.title.lower().strip())
+            ratio: int = fuzz.token_set_ratio(title_normalised, existing.title.lower().strip())
             if ratio >= _FUZZY_RATIO_THRESHOLD:
                 is_dup = True
                 break
@@ -175,19 +192,37 @@ def _deduplicate(papers: list[Paper]) -> list[Paper]:
 
 
 # ---------------------------------------------------------------------------
-# Ranking helpers
+# Ranking helpers — citation velocity heuristic
 # ---------------------------------------------------------------------------
 
-_CITATION_WEIGHT = 0.5
+_VELOCITY_WEIGHT = 0.5
 _RECENCY_WEIGHT = 0.3
 _POSITION_WEIGHT = 0.2
 _BASE_YEAR = 2000
 
 
+def _citation_velocity(citation_count: int, paper_year: int, current_year: int) -> float:
+    """Compute time-normalised citation velocity.
+
+    velocity = citations / paper_age_years  (capped at 1.0 after log scaling)
+
+    This balances seminal papers with high raw counts against recent
+    breakthroughs with fewer but faster-accumulating citations.
+    """
+    age = max(1, current_year - paper_year + 1)  # +1 avoids div-by-zero for current year
+    raw_velocity = citation_count / age
+    # Log-scale and cap to [0, 1] — log1p(50)/log1p(50)=1.0 is the saturation point.
+    return min(1.0, math.log1p(raw_velocity) / math.log1p(50))
+
+
 def _rank(papers: list[Paper]) -> list[Paper]:
     """Score each paper and return sorted descending.
 
-    Score = position_score * W_pos + recency_score * W_rec + citation_score * W_cit
+    Score = position_score * W_pos + recency_score * W_rec + velocity_score * W_vel
+
+    Citation velocity replaces the raw citation count bump, normalising
+    by paper age so that a 2024 paper with 50 citations ranks higher than
+    a 2005 paper with 200 citations.
     """
     from datetime import UTC as _UTC
     from datetime import datetime as _dt
@@ -201,9 +236,8 @@ def _rank(papers: list[Paper]) -> list[Paper]:
         pos = 1.0 - idx / total
         year = paper.year or _BASE_YEAR
         recency = max(0.0, (year - _BASE_YEAR) / max(1, current_year - _BASE_YEAR))
-        citation_count = paper.citation_count or 0
-        citation = min(1.0, citation_count / 100.0)
-        return pos * _POSITION_WEIGHT + recency * _RECENCY_WEIGHT + citation * _CITATION_WEIGHT
+        velocity = _citation_velocity(paper.citation_count or 0, year, current_year)
+        return pos * _POSITION_WEIGHT + recency * _RECENCY_WEIGHT + velocity * _VELOCITY_WEIGHT
 
     indexed = list(enumerate(papers))
     indexed.sort(key=lambda t: _score(t[1], t[0]), reverse=True)

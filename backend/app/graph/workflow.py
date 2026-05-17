@@ -62,7 +62,7 @@ async def node_discover(state: GraphState) -> GraphState:
     librarian = Librarian()
     result = await librarian.run(
         LibrarianInput(
-            seed_query=state.get("seed_query", ""),  # type: ignore[arg-type]
+            seed_query=state.get("seed_query", ""),
             project_id=state.get("project_id"),
         )
     )
@@ -73,7 +73,7 @@ async def node_discover(state: GraphState) -> GraphState:
         **state,
         "phase": Phase.DISCOVERY,
         "candidates": result.candidates,
-        "expanded_queries": result.expanded_queries,  # type: ignore[typeddict-item]
+        "expanded_queries": result.expanded_queries,
         "awaiting_approval": False,  # gate node sets this
     }
 
@@ -159,26 +159,6 @@ def _route_after_section(state: GraphState) -> str:
 
 
 # ---------------------------------------------------------------------------
-# State graph definition
-# ---------------------------------------------------------------------------
-
-
-class AgentState(TypedDict):
-    project_id: UUID
-    seed_query: str
-    candidates: list[Paper]
-    feedback: str | None
-
-
-class WorkflowGraph:
-    """Encapsulates the LangGraph state machine builder."""
-
-    `checkpointer` must be an AsyncPostgresSaver (or MemorySaver for tests).
-    The caller (lifespan hook or workflow service) is responsible for
-    initialising and closing the checkpointer connection pool.
-
-
-# ---------------------------------------------------------------------------
 # Graph builder
 # ---------------------------------------------------------------------------
 
@@ -194,7 +174,7 @@ def build_graph(checkpointer: Any) -> Any:
     after `node_await_pool_approval` hands control to LangGraph's interrupt
     mechanism.
     """
-    g: StateGraph = StateGraph(GraphState)
+    g: StateGraph[GraphState] = StateGraph(GraphState)
 
     # Register nodes
     g.add_node(NODE_DISCOVER, node_discover)
