@@ -3,7 +3,7 @@ import os
 from google import genai
 
 client = genai.Client(
-    api_key=os.environ.get("LLM_API_KEY", "AIzaSyA0NZDsmWG6YN7hE0DIE9tJRa_5MLDZ2-c")
+    api_key=os.environ.get("LLM_API_KEY")
 )
 try:
     models = client.models.list()
