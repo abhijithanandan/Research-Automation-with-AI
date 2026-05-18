@@ -4,7 +4,7 @@ Welcome. This repo is in the onboarding phase — the specs are settled, the imp
 
 ---
 
-## TL;DR
+## TL; DR
 
 1. Read `BRD.md`, `SPEC.md`, and the agent contract under `docs/agents/` for the area you're touching.
 2. If your change alters a contract, update `SPEC.md` and `docs/api/openapi.yaml` in the *same* PR.
