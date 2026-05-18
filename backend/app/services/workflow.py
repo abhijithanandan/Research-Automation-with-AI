@@ -164,7 +164,7 @@ async def start_workflow(
 
     # Dispatch the graph in the background so the HTTP response returns quickly.
     asyncio.create_task(  # noqa: RUF006
-        _run_graph(run.id, project_id, project.seed_query, session)
+        _run_graph(run.id, project_id, project.seed_query)
     )
 
     return _run_to_schema(run)
@@ -174,7 +174,6 @@ async def _run_graph(
     run_id: UUID,
     project_id: UUID,
     seed_query: str,
-    session: AsyncSession,
 ) -> None:
     """Execute the graph for the given run. Runs as a background task."""
     graph = get_compiled_graph()
@@ -211,7 +210,10 @@ async def _run_graph(
         )
         await graph.ainvoke(initial_state, config)
         # Graph interrupted — update state to awaiting_approval.
-        await _update_run_state(session, run_id, "awaiting_approval")
+        from app.db.session import get_session
+
+        async with get_session() as bg_session:
+            await _update_run_state(bg_session, run_id, "awaiting_approval")
         await _emit(
             project_id,
             {
@@ -226,7 +228,10 @@ async def _run_graph(
         )
     except Exception as exc:
         _log.error("graph_run_error", run_id=str(run_id), error=str(exc))
-        await _update_run_state(session, run_id, "error")
+        from app.db.session import get_session
+
+        async with get_session() as bg_session:
+            await _update_run_state(bg_session, run_id, "error")
         await _emit(
             project_id,
             {"type": "agent.error", "agent": "librarian", "run_id": str(run_id), "error": str(exc)},
@@ -257,7 +262,7 @@ async def approve_workflow(
     graph = get_compiled_graph()
     config = {"configurable": {"thread_id": str(run_id)}}
 
-    action = "reject" if feedback else "approve"
+    action = "approve"
     await graph.ainvoke(Command(resume=action), config)
 
     await _update_run_state(session, run_id, "approved")

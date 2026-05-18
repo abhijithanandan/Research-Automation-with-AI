@@ -208,11 +208,10 @@ def build_graph(checkpointer: Any) -> Any:
 
     g.add_edge(NODE_ASSEMBLE, END)
 
-    # Compile — interrupt_before NODE_AWAIT_POOL so the checkpoint is saved
-    # before the gate is reached (satisfies SPEC §5.3 invariant 1).
+    # Compile — using modern checkpointer. Node itself calls interrupt() internally,
+    # avoiding redundant external double-interrupts.
     compiled = g.compile(
         checkpointer=checkpointer,
-        interrupt_before=[NODE_AWAIT_POOL],
     )
     return compiled
 

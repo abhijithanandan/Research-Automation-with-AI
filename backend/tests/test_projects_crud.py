@@ -46,7 +46,7 @@ def app_with_mocked_graph():
 
 
 @pytest.fixture()
-def override_auth(app_with_mocked_graph):
+async def override_auth(app_with_mocked_graph):
     """Override auth + db dependencies with test stubs."""
     app = app_with_mocked_graph
 
@@ -58,9 +58,7 @@ def override_auth(app_with_mocked_graph):
         async with engine.begin() as conn:
             await conn.run_sync(Base.metadata.create_all)
 
-    import asyncio
-
-    asyncio.get_event_loop().run_until_complete(create_tables())
+    await create_tables()
 
     async def _get_test_session() -> AsyncIterator[AsyncSession]:
         async with factory() as session:

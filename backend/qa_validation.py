@@ -6,7 +6,10 @@ import time
 
 import httpx
 
-# Extract IDs from arguments
+# Extract IDs from arguments with bounds checking
+if len(sys.argv) < 2:
+    print("Usage: python qa_validation.py <project_id>")
+    sys.exit(1)
 PROJECT_ID = sys.argv[1]
 
 API_BASE = "http://127.0.0.1:8000/api/v1"

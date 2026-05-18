@@ -83,7 +83,7 @@ async def update_paper(
             payload={
                 "user_id": str(user.id),
                 "paper_id": str(paper_id),
-                "approved": payload.approved,
+                "updates": payload.model_dump(exclude_none=True),
             },
             created_at=datetime.now(tz=UTC),
         )

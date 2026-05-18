@@ -11,12 +11,15 @@ sys.path.insert(0, os.path.dirname(__file__))
 async def main() -> None:
     from app.services.workflow import get_compiled_graph
 
-    # The run_id is used as thread_id
-    run_id = "07effa21-8a85-4a3a-8bb0-1bdfd0db66a2"
+    # The run_id is used as thread_id (can be passed via command line)
+    if len(sys.argv) > 1:
+        run_id = sys.argv[1]
+    else:
+        run_id = "07effa21-8a85-4a3a-8bb0-1bdfd0db66a2"
 
     graph = get_compiled_graph()
     config = {"configurable": {"thread_id": run_id}}
-    snapshot = graph.get_state(config)
+    snapshot = await graph.aget_state(config)
 
     state = snapshot.values
     candidates = state.get("candidates", [])
@@ -57,17 +60,21 @@ async def main() -> None:
     old_papers = [y for y in years if y is not None and y < 2021]
     print(f"Papers with year < 2021: {len(old_papers)}")
 
-    dup_ids = len(external_ids) - len(set(external_ids))
+    # Filter empty strings/values to avoid false duplicate counting
+    valid_external_ids = [eid for eid in external_ids if eid]
+    dup_ids = len(valid_external_ids) - len(set(valid_external_ids))
     print(f"Duplicate external_ids: {dup_ids}")
 
     empty_keys = [k for k in citation_keys if not k]
     print(f"Papers without citation key: {len(empty_keys)}")
 
-    dup_keys = len(citation_keys) - len(set(citation_keys))
+    valid_keys = [k for k in citation_keys if k]
+    dup_keys = len(valid_keys) - len(set(valid_keys))
     print(f"Duplicate citation keys: {dup_keys}")
 
     print(f"All approved=False: {all_approved_false}")
     print(f"Graph paused at: {snapshot.next}")
 
 
-asyncio.run(main())
+if __name__ == "__main__":
+    asyncio.run(main())

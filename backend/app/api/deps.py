@@ -40,9 +40,13 @@ async def get_current_user(
     try:
         claims = await verify_firebase_token(token)
     except Exception as exc:
+        from app.utils.logging import get_logger
+
+        _log = get_logger(__name__)
+        _log.error("Authentication error validating token", exc_info=exc)
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail=f"Invalid authentication credentials: {exc}",
+            detail="Invalid authentication credentials",
             headers={"WWW-Authenticate": "Bearer"},
         ) from exc
 
@@ -78,5 +82,7 @@ _STUB_USER_ID = UUID("00000000-0000-0000-0000-000000000001")
 
 def _stable_uuid_from_uid(uid: str) -> UUID:
     """Deterministic UUID from a Firebase UID string (no DB lookup needed)."""
-    raw = uid.encode()[:16].ljust(16, b"\x00")
-    return UUID(int=int.from_bytes(raw, "big"))
+    import hashlib
+
+    digest = hashlib.sha256(uid.encode()).digest()
+    return UUID(bytes=digest[:16])

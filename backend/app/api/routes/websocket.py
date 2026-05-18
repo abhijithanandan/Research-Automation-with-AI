@@ -37,13 +37,25 @@ async def project_events(project_id: UUID, ws: WebSocket) -> None:
         await ws.close(code=4401, reason="expected auth message")
         return
 
+    from app.api.deps import _stable_uuid_from_uid
+    from app.db.session import get_session
+    from app.models.db import ProjectRow
     from app.services.auth import verify_firebase_token
 
     try:
-        await verify_firebase_token(str(first_msg["token"]))
+        claims = await verify_firebase_token(str(first_msg["token"]))
     except Exception:
         await ws.close(code=4401, reason="invalid token")
         return
+
+    uid = str(claims.get("uid", ""))
+    user_id = _stable_uuid_from_uid(uid)
+
+    async with get_session() as db:
+        project = await db.get(ProjectRow, project_id)
+        if project is None or project.owner_id != user_id:
+            await ws.close(code=4403, reason="unauthorized for project")
+            return
 
     await ws.send_json({"type": "auth.ok"})
     _log.info("ws_connected", project_id=str(project_id))

@@ -110,7 +110,7 @@ async def list_candidates(
 
     graph = wf_svc.get_compiled_graph()
     config = {"configurable": {"thread_id": str(run.id)}}
-    snapshot = graph.get_state(config)
+    snapshot = await graph.aget_state(config)
     candidates: list[dict[str, Any]] = snapshot.values.get("candidates", [])
     return candidates
 

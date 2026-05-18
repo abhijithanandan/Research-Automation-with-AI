@@ -1,13 +1,16 @@
 import asyncio
+import subprocess
 
-from app.db.session import _engine as engine
-from app.models.db import Base
+
+def run_alembic():
+    # In Windows/Linux, we run alembic command to run migrations cleanly.
+    # Using shell=True guarantees that alembic is found on the PATH of virtualenv/host OS.
+    subprocess.run("alembic upgrade head", shell=True, check=True)
 
 
 async def init_db():
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-    print("Database tables created successfully!")
+    await asyncio.to_thread(run_alembic)
+    print("Database migrated to head successfully!")
 
 
 if __name__ == "__main__":

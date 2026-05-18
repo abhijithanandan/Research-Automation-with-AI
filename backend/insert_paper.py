@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import UTC, datetime
 from uuid import UUID
 
 from sqlalchemy.orm import Session
@@ -17,7 +17,7 @@ with Session(engine.sync_engine) as session:
         year=2023,
         abstract="This paper surveys...",
         citation_key="smith2023",
-        added_at=datetime.utcnow(),
+        added_at=datetime.now(UTC),
     )
     session.add(paper)
     session.commit()

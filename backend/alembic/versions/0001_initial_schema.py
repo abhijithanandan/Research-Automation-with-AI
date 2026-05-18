@@ -99,6 +99,7 @@ def upgrade() -> None:
         sa.Column("abstract", sa.Text(), nullable=True),
         sa.Column("pdf_url", sa.String(), nullable=True),
         sa.Column("citation_key", sa.String(), nullable=False),
+        sa.Column("citation_count", sa.Integer(), nullable=True),
         sa.Column("approved", sa.Boolean(), server_default="false", nullable=False),
         sa.Column(
             "added_at",
