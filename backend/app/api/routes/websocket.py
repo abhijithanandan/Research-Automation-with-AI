@@ -48,8 +48,12 @@ async def project_events(project_id: UUID, ws: WebSocket) -> None:
         await ws.close(code=4401, reason="invalid token")
         return
 
-    uid = str(claims.get("uid", ""))
-    user_id = _stable_uuid_from_uid(uid)
+    uid = claims.get("uid")
+    if not uid:
+        await ws.close(code=4401, reason="invalid token")
+        return
+
+    user_id = _stable_uuid_from_uid(str(uid))
 
     async with get_session() as db:
         project = await db.get(ProjectRow, project_id)

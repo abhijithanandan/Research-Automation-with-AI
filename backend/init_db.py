@@ -1,11 +1,11 @@
 import asyncio
 import subprocess
+import sys
 
 
 def run_alembic():
-    # In Windows/Linux, we run alembic command to run migrations cleanly.
-    # Using shell=True guarantees that alembic is found on the PATH of virtualenv/host OS.
-    subprocess.run("alembic upgrade head", shell=True, check=True)
+    # Run alembic upgrade head using the active Python interpreter/venv cleanly
+    subprocess.run([sys.executable, "-m", "alembic", "upgrade", "head"], check=True, shell=False)
 
 
 async def init_db():

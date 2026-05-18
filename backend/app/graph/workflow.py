@@ -101,10 +101,10 @@ async def node_await_pool_approval(state: GraphState) -> GraphState:
     # On resume, `approval` carries the action string: "approve" | "reject".
     if approval == "reject":
         _log.info("gate_pool_rejected", project_id=str(state.get("project_id")))
-        return {**state, "awaiting_approval": False}  # re-enters discover
+        return {**state, "awaiting_approval": False, "pool_approval": "reject"}
 
     _log.info("gate_pool_approved", project_id=str(state.get("project_id")))
-    return {**state, "awaiting_approval": False}
+    return {**state, "awaiting_approval": False, "pool_approval": "approve"}
 
 
 async def node_synthesize(state: GraphState) -> GraphState:
@@ -141,12 +141,12 @@ async def node_assemble(state: GraphState) -> GraphState:
 def _route_after_pool(state: GraphState) -> str:
     """After the approval gate, decide where to go.
 
-    If the gate was rejected (last_feedback present and no approved papers),
+    If the gate was rejected (pool_approval == "reject"),
     loop back to discover. Otherwise advance to synthesize.
     """
     # If rejected the gate node returns awaiting_approval=False without
     # advancing the phase — we detect that and re-run discover.
-    if state.get("last_feedback") and not state.get("approved_pool"):
+    if state.get("pool_approval") == "reject":
         return NODE_DISCOVER
     return NODE_SYNTHESIZE
 

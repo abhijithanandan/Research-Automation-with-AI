@@ -45,3 +45,4 @@ class GraphState(TypedDict, total=False):
     awaiting_approval: bool
     last_feedback: str | None
     last_override: Artifact | None
+    pool_approval: str | None
