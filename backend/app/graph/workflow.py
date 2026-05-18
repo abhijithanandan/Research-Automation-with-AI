@@ -72,7 +72,7 @@ async def node_discover(state: GraphState) -> GraphState:
     return {
         **state,
         "phase": Phase.DISCOVERY,
-        "candidates": result.candidates,
+        "candidates": [p.model_dump(mode="json") for p in result.candidates],
         "expanded_queries": result.expanded_queries,
         "awaiting_approval": False,  # gate node sets this
     }

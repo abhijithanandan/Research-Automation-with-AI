@@ -7,11 +7,13 @@ In dev (DEV_AUTH_BYPASS=true), the raw token string is used as firebase_uid.
 
 from __future__ import annotations
 
+from collections.abc import AsyncIterator
 from datetime import UTC, datetime
 from typing import Annotated
 from uuid import UUID
 
 from fastapi import Depends, Header, HTTPException, status
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.schemas import User
 from app.services.auth import verify_firebase_token
@@ -58,9 +60,6 @@ async def get_current_user(
 CurrentUser = Annotated[User, Depends(get_current_user)]
 
 
-from collections.abc import AsyncIterator
-
-
 async def get_db_session() -> AsyncIterator[AsyncSession]:
     """Yield an async SQLAlchemy session. Import lazily to avoid circular deps."""
     from app.db.session import get_session
@@ -70,8 +69,6 @@ async def get_db_session() -> AsyncIterator[AsyncSession]:
 
 
 # Convenience alias — routes annotate: `db: DbSession`
-
-from sqlalchemy.ext.asyncio import AsyncSession  # noqa: E402
 
 DbSession = Annotated[AsyncSession, Depends(get_db_session)]
 

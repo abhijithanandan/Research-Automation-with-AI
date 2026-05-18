@@ -73,7 +73,7 @@ async def project_events(project_id: UUID, ws: WebSocket) -> None:
     reader = asyncio.create_task(_read_pings())
 
     try:
-        done, pending = await asyncio.wait([sender, reader], return_when=asyncio.FIRST_COMPLETED)
+        _done, pending = await asyncio.wait([sender, reader], return_when=asyncio.FIRST_COMPLETED)
         for task in pending:
             task.cancel()
     except WebSocketDisconnect:

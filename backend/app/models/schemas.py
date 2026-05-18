@@ -3,14 +3,14 @@
 from __future__ import annotations
 
 from datetime import datetime
-from enum import Enum
+from enum import StrEnum
 from typing import Literal
 from uuid import UUID
 
 from pydantic import BaseModel, EmailStr, HttpUrl
 
 
-class Phase(str, Enum):
+class Phase(StrEnum):
     DISCOVERY = "discovery"
     SYNTHESIS = "synthesis"
     ANALYSIS = "analysis"

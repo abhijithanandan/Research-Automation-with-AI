@@ -54,8 +54,8 @@ async def test_graph_pauses_after_discover() -> None:
         candidates=[_mock_paper()], expanded_queries=["mock query"], arxiv_categories=[]
     )
 
-    with patch("app.graph.workflow.Librarian") as MockLibrarian:
-        MockLibrarian.return_value.run = AsyncMock(return_value=mock_output)
+    with patch("app.graph.workflow.Librarian") as mock_librarian:
+        mock_librarian.return_value.run = AsyncMock(return_value=mock_output)
 
         initial: GraphState = {
             "project_id": project_id,
@@ -76,7 +76,7 @@ async def test_graph_pauses_after_discover() -> None:
         }
 
         # First invocation: should run discover and then pause.
-        result = await graph.ainvoke(initial, config)
+        await graph.ainvoke(initial, config)
 
     # The graph must have stopped — state should contain candidates.
     snapshot = graph.get_state(config)
@@ -98,8 +98,8 @@ async def test_graph_advances_on_approve() -> None:
         candidates=[_mock_paper()], expanded_queries=[], arxiv_categories=[]
     )
 
-    with patch("app.graph.workflow.Librarian") as MockLibrarian:
-        MockLibrarian.return_value.run = AsyncMock(return_value=mock_output)
+    with patch("app.graph.workflow.Librarian") as mock_librarian:
+        mock_librarian.return_value.run = AsyncMock(return_value=mock_output)
 
         initial: GraphState = {
             "project_id": project_id,

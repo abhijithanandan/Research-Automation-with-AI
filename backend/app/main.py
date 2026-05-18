@@ -20,11 +20,30 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     configure_logging(settings.log_level)
 
     import structlog
+    from sqlalchemy import update
 
+    from app.db.session import get_session
     from app.graph.workflow import create_postgres_checkpointer
+    from app.models.db import WorkflowRunRow
     from app.services.workflow import init_graph
 
     _log = structlog.get_logger(__name__)
+
+    async def _cleanup_orphaned_runs() -> None:
+        try:
+            async with get_session() as session:
+                await session.execute(
+                    update(WorkflowRunRow)
+                    .where(WorkflowRunRow.state == "running")
+                    .values(state="failed")
+                )
+            _log.info("cleaned_up_orphaned_workflow_runs")
+        except Exception as exc:
+            _log.warning("failed_to_cleanup_orphaned_runs", error=str(exc))
+
+    # Run cleanup before graph initialization
+    await _cleanup_orphaned_runs()
+
     checkpointer = None
 
     try:

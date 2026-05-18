@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from typing import Any
 from uuid import UUID
 
 from fastapi import APIRouter, HTTPException, status
@@ -91,6 +92,27 @@ async def override(
     if run is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "No active workflow run")
     return await wf_svc.approve_workflow(db, project_id, run.id, user.id)
+
+
+@router.get("/candidates", response_model=list[dict[str, Any]])
+async def list_candidates(
+    project_id: UUID, user: CurrentUser, db: DbSession
+) -> list[dict[str, Any]]:
+    """Read candidate papers from the LangGraph checkpoint state.
+
+    This avoids needing a separate DB persistence step — the graph state
+    is the source of truth while the workflow is awaiting approval.
+    """
+    await _assert_project_owned(db, project_id, user.id)
+    run = await wf_svc.get_active_run(db, project_id)
+    if run is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "No active workflow run")
+
+    graph = wf_svc.get_compiled_graph()
+    config = {"configurable": {"thread_id": str(run.id)}}
+    snapshot = graph.get_state(config)
+    candidates: list[dict[str, Any]] = snapshot.values.get("candidates", [])
+    return candidates
 
 
 # ---------------------------------------------------------------------------
