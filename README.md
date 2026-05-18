@@ -5,13 +5,14 @@
 ![FastAPI](https://img.shields.io/badge/FastAPI-0.110+-009688.svg)
 ![LangGraph](https://img.shields.io/badge/LangGraph-Agentic-orange)
 ![License](https://img.shields.io/badge/License-MIT-green.svg)
-![Status](https://img.shields.io/badge/status-pre--MVP-yellow.svg)
+![Status](https://img.shields.io/badge/status-Phase%201%20Hardened-green.svg)
 
 ResearchFlow AI is a hybrid, multi-agent AI workflow designed to accelerate academic and technical research. The system automates repetitive tasks across the research lifecycle — from literature discovery through manuscript drafting — while keeping a human firmly in control of every consequential decision.
 
 A defining principle is **Strict Human-in-the-Loop (HITL) Orchestration**: the AI is a co-pilot, not a replacement. The state machine *cannot* advance between phases without an explicit human approval event.
 
-> **Status:** This repository is currently in the onboarding / scaffolding phase. The boilerplate, specs, and contracts in this repo are the contract between the BRD and the implementation. Read `BRD.md` and `SPEC.md` before writing code.
+> [!NOTE]
+> **Status:** **Phase 1 (Query & Discovery)** is fully implemented, verified, and hardened. The Librarian agent supports semantic velocity ranking, strict abstract XML encapsulation to prevent indirect prompt injections, robust BibTeX key collision resolution (>26 items), and startup reconciliation for orphaned runs. The backend passes strict `mypy --strict` and `ruff` formatting, with a 100% pass rate in our `pytest` suites.
 
 ---
 
