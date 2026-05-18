@@ -34,8 +34,15 @@ class GeminiProvider:
     """Wraps google-genai for use as an LLMProvider."""
 
     def __init__(self, api_key: str, model: str) -> None:
-        self._client = genai.Client(api_key=api_key)
+        self._api_key = api_key
         self._model_name = model
+        self._client: genai.Client | None = None
+
+    @property
+    def client(self) -> genai.Client:
+        if self._client is None:
+            self._client = genai.Client(api_key=self._api_key)
+        return self._client
 
     async def complete(self, prompt: str, **kwargs: object) -> str:
         # Offload blocking SDK call to a thread so we don't block the event loop.
@@ -50,7 +57,7 @@ class GeminiProvider:
             config = None
 
         response = await asyncio.to_thread(
-            self._client.models.generate_content,
+            self.client.models.generate_content,
             model=self._model_name,
             contents=prompt,
             config=config,  # type: ignore[arg-type]
@@ -60,7 +67,7 @@ class GeminiProvider:
     async def stream(self, prompt: str, **kwargs: object) -> AsyncIterator[str]:
         # google-genai streaming via generate_content_stream.
         response_stream = await asyncio.to_thread(
-            self._client.models.generate_content_stream,
+            self.client.models.generate_content_stream,
             model=self._model_name,
             contents=prompt,
         )
