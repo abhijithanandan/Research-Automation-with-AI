@@ -83,15 +83,30 @@ async def reject(
 async def override(
     project_id: UUID, payload: OverridePayload, user: CurrentUser, db: DbSession
 ) -> WorkflowRun:
-    """Submit a manually-edited artifact in place of the agent output."""
+    """Submit a manually-edited artifact in place of the agent output.
+
+    Writes an ArtifactRow (produced_by='human') and an audit entry
+    before advancing the gate (SPEC §7.3).
+    """
     await _assert_project_owned(db, project_id, user.id)
-    # Override treated as approve with a manual artifact recorded.
-    # Full implementation wires the artifact write; for Phase 1 it delegates
-    # to approve so the gate advances.
     run = await wf_svc.get_active_run(db, project_id)
     if run is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "No active workflow run")
-    return await wf_svc.approve_workflow(db, project_id, run.id, user.id)
+    if run.state != "awaiting_approval":
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            detail={"code": "phase_locked", "message": "Workflow is not awaiting approval."},
+        )
+    return await wf_svc.override_workflow(
+        db,
+        project_id=project_id,
+        run_id=run.id,
+        user_id=user.id,
+        artifact_kind=payload.artifact_kind,
+        label=payload.label,
+        content=payload.content,
+        mime_type=payload.mime_type,
+    )
 
 
 @router.get("/candidates", response_model=list[dict[str, Any]])

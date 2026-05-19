@@ -22,8 +22,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.graph.state import GraphState
 from app.graph.workflow import build_graph
-from app.models.db import AuditLogRow, ProjectRow, WorkflowRunRow
-from app.models.schemas import Phase, WorkflowRun
+from app.models.db import ArtifactRow, AuditLogRow, PaperRow, ProjectRow, WorkflowRunRow
+from app.models.schemas import Paper, Phase, WorkflowRun
 from app.utils.logging import get_logger
 
 _log = get_logger(__name__)
@@ -97,6 +97,54 @@ async def _write_audit(
         created_at=datetime.now(tz=UTC),
     )
     session.add(entry)
+
+
+# ---------------------------------------------------------------------------
+# Paper persistence helper
+# ---------------------------------------------------------------------------
+
+
+async def _persist_candidates(
+    session: AsyncSession,
+    project_id: UUID,
+    run_id: UUID,
+    papers: list[Paper],
+) -> None:
+    """Upsert candidate papers into the `papers` table.
+
+    Keyed by (project_id, citation_key) — idempotent on re-runs.
+    All rows are written with approved=False regardless of input
+    (invariant from docs/agents/librarian.md §Invariants).
+    """
+    now = datetime.now(tz=UTC)
+    for paper in papers:
+        # Check if a row with this (project_id, citation_key) already exists.
+        existing = (
+            await session.execute(
+                select(PaperRow).where(
+                    PaperRow.project_id == project_id,
+                    PaperRow.citation_key == paper.citation_key,
+                )
+            )
+        ).scalars().first()
+        if existing is not None:
+            continue
+        row = PaperRow(
+            id=paper.id,
+            project_id=project_id,
+            source=paper.source,
+            external_id=paper.external_id,
+            title=paper.title,
+            authors=list(paper.authors),
+            year=paper.year,
+            abstract=paper.abstract,
+            pdf_url=str(paper.pdf_url) if paper.pdf_url else None,
+            citation_key=paper.citation_key,
+            citation_count=paper.citation_count,
+            approved=False,  # invariant — never trust input
+            added_at=now,
+        )
+        session.add(row)
 
 
 # ---------------------------------------------------------------------------
@@ -204,16 +252,25 @@ async def _run_graph(
         "summary": None,
     }
 
+    # Late import — avoids circular imports at module load time.
+    from app.db.session import get_session
+
     try:
         await _emit(
             project_id, {"type": "agent.started", "agent": "librarian", "run_id": str(run_id)}
         )
         await graph.ainvoke(initial_state, config)
-        # Graph interrupted — update state to awaiting_approval.
-        from app.db.session import get_session
+
+        # ainvoke returns (does not raise) when the graph hits interrupt().
+        # Persist the candidate papers then update DB state to awaiting_approval.
+        graph_state = await graph.aget_state(config)
+        candidates_raw: list[dict] = graph_state.values.get("candidates", [])
+        candidate_papers = [Paper(**d) for d in candidates_raw]
 
         async with get_session() as bg_session:
+            await _persist_candidates(bg_session, project_id, run_id, candidate_papers)
             await _update_run_state(bg_session, run_id, "awaiting_approval")
+
         await _emit(
             project_id,
             {
@@ -227,9 +284,9 @@ async def _run_graph(
             project_id, {"type": "agent.completed", "agent": "librarian", "run_id": str(run_id)}
         )
     except Exception as exc:
+        # GraphInterrupt is handled by LangGraph internally (ainvoke returns, not raises).
+        # Any exception reaching here is a genuine failure.
         _log.error("graph_run_error", run_id=str(run_id), error=str(exc))
-        from app.db.session import get_session
-
         async with get_session() as bg_session:
             await _update_run_state(bg_session, run_id, "error")
         await _emit(
@@ -246,7 +303,9 @@ async def _update_run_state(session: AsyncSession, run_id: UUID, new_state: str)
     await session.execute(
         update(WorkflowRunRow).where(WorkflowRunRow.id == run_id).values(**values)
     )
-    await session.commit()
+    # No commit here — callers own the transaction:
+    # _run_graph uses get_session() which auto-commits on clean exit;
+    # route handlers use DbSession whose get_session() also auto-commits.
 
 
 async def approve_workflow(
@@ -256,14 +315,52 @@ async def approve_workflow(
     user_id: UUID,
     feedback: str | None = None,
 ) -> WorkflowRun:
-    """Resume the graph with an approve command."""
+    """Resume the graph with an approve command.
+
+    Hydrates state["approved_pool"] from DB-approved papers (SPEC §5.2, §6.2)
+    and writes a phase_1.approved_pool audit entry for the audit trail.
+    """
     run = await _assert_awaiting(session, run_id)
+
+    # Build the approved pool from DB — these are the papers the user toggled
+    # via PATCH /papers/{id} before calling approve.
+    approved_rows = (
+        await session.execute(
+            select(PaperRow).where(
+                PaperRow.project_id == project_id,
+                PaperRow.approved.is_(True),
+            )
+        )
+    ).scalars().all()
+
+    approved_pool = [
+        {
+            "id": str(r.id),
+            "project_id": str(r.project_id),
+            "source": r.source,
+            "external_id": r.external_id,
+            "title": r.title,
+            "authors": list(r.authors),
+            "year": r.year,
+            "abstract": r.abstract,
+            "pdf_url": r.pdf_url,
+            "citation_key": r.citation_key,
+            "citation_count": r.citation_count,
+            "approved": True,
+            "added_at": r.added_at.isoformat(),
+        }
+        for r in approved_rows
+    ]
+    citation_keys = [r.citation_key for r in approved_rows]
 
     graph = get_compiled_graph()
     config = {"configurable": {"thread_id": str(run_id)}}
 
-    action = "approve"
-    await graph.ainvoke(Command(resume=action), config)
+    # Pass approved_pool into the graph state on resume so Phase 2 (Critic) can read it.
+    await graph.ainvoke(
+        Command(resume="approve", update={"approved_pool": approved_pool}),
+        config,
+    )
 
     await _update_run_state(session, run_id, "approved")
     await _write_audit(
@@ -274,6 +371,96 @@ async def approve_workflow(
         action="user.approve",
         payload={"user_id": str(user_id), "feedback": feedback},
     )
+    # Audit entry for the approved pool snapshot (SPEC §7.3 audit-trail completeness).
+    await _write_audit(
+        session,
+        project_id=project_id,
+        workflow_run_id=run_id,
+        actor="system",
+        action="phase_1.approved_pool",
+        payload={"citation_keys": citation_keys, "count": len(citation_keys)},
+    )
+    await _emit(
+        project_id,
+        {
+            "type": "state.changed",
+            "phase": Phase.SYNTHESIS.value,
+            "state": "running",
+            "run_id": str(run_id),
+        },
+    )
+    return _run_to_schema(run)
+
+
+async def override_workflow(
+    session: AsyncSession,
+    project_id: UUID,
+    run_id: UUID,
+    user_id: UUID,
+    artifact_kind: str,
+    label: str,
+    content: str,
+    mime_type: str = "text/markdown",
+) -> WorkflowRun:
+    """Submit a manually-edited artifact and advance the gate.
+
+    Writes an ArtifactRow (produced_by='human') and an audit entry
+    (action='user.override'), then resumes the graph with the artifact
+    injected into state['last_override'] (SPEC §7.3, state-machine §Reject vs Override).
+    """
+    run = await _assert_awaiting(session, run_id)
+
+    now = datetime.now(tz=UTC)
+    artifact = ArtifactRow(
+        id=uuid4(),
+        project_id=project_id,
+        kind=artifact_kind,
+        label=label,
+        content=content,
+        mime_type=mime_type,
+        produced_by="human",
+        created_at=now,
+    )
+    session.add(artifact)
+    await session.flush()  # ensure artifact.id is available for the audit payload
+
+    await _write_audit(
+        session,
+        project_id=project_id,
+        workflow_run_id=run_id,
+        actor="user",
+        action="user.override",
+        payload={
+            "user_id": str(user_id),
+            "artifact_id": str(artifact.id),
+            "artifact_kind": artifact_kind,
+            "label": label,
+        },
+    )
+
+    # Build the Artifact dict for state injection (must be a plain dict for
+    # LangGraph checkpoint serialisation — Pydantic models are not supported).
+    artifact_state = {
+        "id": str(artifact.id),
+        "project_id": str(project_id),
+        "kind": artifact_kind,
+        "label": label,
+        "content": content,
+        "mime_type": mime_type,
+        "produced_by": "human",
+        "parent_id": None,
+        "created_at": now.isoformat(),
+    }
+
+    graph = get_compiled_graph()
+    config = {"configurable": {"thread_id": str(run_id)}}
+
+    await graph.ainvoke(
+        Command(resume="approve", update={"last_override": artifact_state}),
+        config,
+    )
+
+    await _update_run_state(session, run_id, "approved")
     await _emit(
         project_id,
         {
