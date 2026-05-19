@@ -32,6 +32,12 @@ _log = get_logger(__name__)
 _compiled_graph: Any = None
 _ws_event_bus: dict[UUID, asyncio.Queue[dict[str, object]]] = {}
 
+# Last significant event per project — replayed to late WS subscribers so
+# they catch approval.required / state.changed even if they connected after
+# the event fired (race condition between workflow/start and WS connect).
+_REPLAY_TYPES = {"approval.required", "state.changed", "agent.error"}
+_last_event: dict[UUID, dict[str, object]] = {}
+
 
 def get_compiled_graph() -> Any:
     if _compiled_graph is None:
@@ -52,9 +58,20 @@ async def init_graph(checkpointer: Any) -> None:
 
 
 def subscribe_project(project_id: UUID) -> asyncio.Queue[dict[str, object]]:
-    """Create (or replace) a project-scoped event queue for a WS connection."""
+    """Create a project-scoped event queue and replay the last significant event.
+
+    Replaying fixes the race where the Librarian finishes and emits
+    approval.required before the frontend WS client has connected.
+    """
     q: asyncio.Queue[dict[str, object]] = asyncio.Queue(maxsize=256)
     _ws_event_bus[project_id] = q
+    # Immediately enqueue the last significant event so late subscribers catch up.
+    cached = _last_event.get(project_id)
+    if cached is not None:
+        try:
+            q.put_nowait(cached)
+        except asyncio.QueueFull:
+            pass
     return q
 
 
@@ -63,8 +80,14 @@ def unsubscribe_project(project_id: UUID) -> None:
 
 
 async def _emit(project_id: UUID, event: dict[str, object]) -> None:
-    """Put an event into the project's WS queue (if anyone is listening)."""
+    """Put an event into the project's WS queue (if anyone is listening).
+
+    Also caches the event if it is a significant type so late WS subscribers
+    can be replayed when they connect.
+    """
     event["ts"] = datetime.now(tz=UTC).isoformat()
+    if event.get("type") in _REPLAY_TYPES:
+        _last_event[project_id] = event
     q = _ws_event_bus.get(project_id)
     if q is not None:
         try:
