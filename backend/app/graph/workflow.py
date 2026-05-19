@@ -224,19 +224,18 @@ def build_graph(checkpointer: Any) -> Any:
 async def create_postgres_checkpointer(
     database_url: str,
 ) -> Any:
-    """Create an AsyncPostgresSaver connected to the given Postgres URL.
+    """Create a pool-backed AsyncPostgresSaver and run setup().
 
-    Import is deferred here so that modules importing `workflow.py` don't
-    trigger psycopg's libpq requirement at collection time (e.g. during tests
-    that use MemorySaver).
-
-    The caller must call `.setup()` once on first run to create the
-    langgraph_checkpoints table, then ensure `.aclose()` on shutdown.
+    Uses psycopg3's AsyncConnectionPool so connections stay alive across
+    background asyncio tasks. The pool is owned by the caller — call
+    `.conn.close()` on shutdown.
     """
-    # Late import — psycopg needs libpq installed system-wide.
+    from psycopg_pool import AsyncConnectionPool
     from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 
-    # AsyncPostgresSaver uses psycopg3 connection strings (not asyncpg).
     pg_url = database_url.replace("postgresql+asyncpg://", "postgresql://")
-    saver = AsyncPostgresSaver.from_conn_string(pg_url)
+    pool = AsyncConnectionPool(conninfo=pg_url, max_size=5, open=False)
+    await pool.open()
+    saver = AsyncPostgresSaver(conn=pool)
+    await saver.setup()
     return saver

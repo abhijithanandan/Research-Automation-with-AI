@@ -50,6 +50,7 @@ async def create_project(
         updated_at=now,
     )
     db.add(row)
+    await db.flush()  # ensure ProjectRow is persisted before audit FK reference
 
     db.add(
         AuditLogRow(

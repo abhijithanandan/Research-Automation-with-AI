@@ -6,9 +6,11 @@ from datetime import datetime
 from typing import Any
 from uuid import UUID, uuid4
 
-from sqlalchemy import JSON, ForeignKey, Numeric, String, Text
+from sqlalchemy import JSON, TIMESTAMP, ForeignKey, Numeric, String, Text
 from sqlalchemy.dialects.postgresql import UUID as PGUUID
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
+
+_TS = TIMESTAMP(timezone=True)
 
 
 class Base(DeclarativeBase):
@@ -22,7 +24,7 @@ class UserRow(Base):
     firebase_uid: Mapped[str] = mapped_column(String, unique=True)
     email: Mapped[str] = mapped_column(String)
     display_name: Mapped[str | None] = mapped_column(String, nullable=True)
-    created_at: Mapped[datetime]
+    created_at: Mapped[datetime] = mapped_column(_TS)
 
 
 class ProjectRow(Base):
@@ -36,8 +38,8 @@ class ProjectRow(Base):
     token_cap_usd: Mapped[float] = mapped_column(Numeric(10, 2), default=5.0)
     status: Mapped[str] = mapped_column(String, default="draft")
     current_phase: Mapped[str] = mapped_column(String, default="discovery")
-    created_at: Mapped[datetime]
-    updated_at: Mapped[datetime]
+    created_at: Mapped[datetime] = mapped_column(_TS)
+    updated_at: Mapped[datetime] = mapped_column(_TS)
 
 
 class WorkflowRunRow(Base):
@@ -50,9 +52,9 @@ class WorkflowRunRow(Base):
     phase: Mapped[str] = mapped_column(String)
     state: Mapped[str] = mapped_column(String)
     checkpoint_id: Mapped[str] = mapped_column(String)
-    started_at: Mapped[datetime]
-    awaiting_since: Mapped[datetime | None]
-    last_event_at: Mapped[datetime]
+    started_at: Mapped[datetime] = mapped_column(_TS)
+    awaiting_since: Mapped[datetime | None] = mapped_column(_TS, nullable=True)
+    last_event_at: Mapped[datetime] = mapped_column(_TS)
 
 
 class PaperRow(Base):
@@ -72,7 +74,7 @@ class PaperRow(Base):
     citation_key: Mapped[str] = mapped_column(String)
     citation_count: Mapped[int | None]
     approved: Mapped[bool] = mapped_column(default=False)
-    added_at: Mapped[datetime]
+    added_at: Mapped[datetime] = mapped_column(_TS)
 
 
 class ArtifactRow(Base):
@@ -90,7 +92,7 @@ class ArtifactRow(Base):
     parent_id: Mapped[UUID | None] = mapped_column(
         PGUUID(as_uuid=True), ForeignKey("artifacts.id"), nullable=True
     )
-    created_at: Mapped[datetime]
+    created_at: Mapped[datetime] = mapped_column(_TS)
 
 
 class AuditLogRow(Base):
@@ -110,4 +112,4 @@ class AuditLogRow(Base):
     tokens_in: Mapped[int | None]
     tokens_out: Mapped[int | None]
     cost_usd: Mapped[float | None] = mapped_column(Numeric(10, 4), nullable=True)
-    created_at: Mapped[datetime]
+    created_at: Mapped[datetime] = mapped_column(_TS)

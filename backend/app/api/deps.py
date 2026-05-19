@@ -83,6 +83,7 @@ async def get_current_user(
                 created_at=now,
             )
         )
+        await db.flush()  # must be visible before any route inserts that FK-reference users.id
     else:
         existing.email = email
         existing.display_name = display_name

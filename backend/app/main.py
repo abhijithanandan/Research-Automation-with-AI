@@ -48,7 +48,6 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
 
     try:
         checkpointer = await create_postgres_checkpointer(settings.database_url)
-        await checkpointer.setup()  # creates langgraph_checkpoints table if absent
         _log.info("checkpointer_postgres_ready")
     except Exception as exc:
         # Postgres unavailable (no Docker in dev) — fall back to in-memory checkpointer.
@@ -66,7 +65,9 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
 
     yield
 
-    if hasattr(checkpointer, "aclose"):
+    if hasattr(checkpointer, "conn") and hasattr(checkpointer.conn, "close"):
+        await checkpointer.conn.close()
+    elif hasattr(checkpointer, "aclose"):
         await checkpointer.aclose()
     from app.db.session import dispose_engine
 
