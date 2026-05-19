@@ -42,6 +42,26 @@ interface RunCtx {
 }
 
 // ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+function paperSourceUrl(paper: Paper): string {
+  // Prefer a direct PDF link when available
+  if (paper.pdf_url) return paper.pdf_url;
+  // Fall back to the canonical source page
+  if (paper.source === "arxiv") {
+    return `https://arxiv.org/abs/${paper.external_id}`;
+  }
+  if (paper.source === "semantic_scholar") {
+    return `https://www.semanticscholar.org/paper/${paper.external_id}`;
+  }
+  if (paper.source === "crossref") {
+    return `https://doi.org/${paper.external_id}`;
+  }
+  return "#";
+}
+
+// ---------------------------------------------------------------------------
 // Component
 // ---------------------------------------------------------------------------
 
@@ -400,7 +420,15 @@ export default function HomePage() {
                       className="cursor-pointer space-y-0.5"
                     >
                       <p className="text-sm font-medium leading-snug">
-                        {paper.title}
+                        <a
+                          href={paperSourceUrl(paper)}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          onClick={(e) => e.stopPropagation()}
+                          className="hover:underline hover:text-blue-500"
+                        >
+                          {paper.title}
+                        </a>
                       </p>
                       <p className="text-xs text-slate-500">
                         {paper.authors.slice(0, 3).join(", ")}
@@ -408,6 +436,8 @@ export default function HomePage() {
                         {paper.year ? ` · ${paper.year}` : ""}
                         {" · "}
                         <code className="text-xs">{paper.citation_key}</code>
+                        {" · "}
+                        <span className="capitalize">{paper.source.replace("_", " ")}</span>
                       </p>
                       {paper.abstract && (
                         <p className="mt-1 line-clamp-2 text-xs text-slate-400">
