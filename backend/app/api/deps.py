@@ -1,8 +1,10 @@
 """FastAPI dependencies: auth, DB session, current user.
 
 `CurrentUser` is the canonical dependency for every protected endpoint.
-It verifies the Firebase ID token and resolves the internal `User` schema.
-In dev (DEV_AUTH_BYPASS=true), the raw token string is used as firebase_uid.
+It verifies the Firebase ID token, upserts a UserRow so that owner_id FK
+constraints resolve on real Postgres (M5 fix), and returns the User schema.
+
+In dev (DEV_AUTH_BYPASS=true) the raw token string is used as firebase_uid.
 """
 
 from __future__ import annotations
@@ -13,20 +15,33 @@ from typing import Annotated
 from uuid import UUID
 
 from fastapi import Depends, Header, HTTPException, status
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.models.db import UserRow
 from app.models.schemas import User
 from app.services.auth import verify_firebase_token
 
 
+async def get_db_session() -> AsyncIterator[AsyncSession]:
+    """Yield an async SQLAlchemy session. Import lazily to avoid circular deps."""
+    from app.db.session import get_session
+
+    async with get_session() as session:
+        yield session
+
+
+DbSession = Annotated[AsyncSession, Depends(get_db_session)]
+
+
 async def get_current_user(
     authorization: Annotated[str | None, Header()] = None,
+    db: DbSession = None,  # type: ignore[assignment]
 ) -> User:
-    """Extract the Bearer token, verify it with Firebase, and return the user.
+    """Verify Firebase token, upsert UserRow, return User schema.
 
-    The internal user representation is a lightweight schema object. Full DB
-    resolution (upsert users table) is deferred to the routes that need it;
-    the auth dependency just validates identity.
+    The upsert ensures a users row exists before any project route runs an
+    INSERT that references owner_id — without this the FK fails on Postgres.
     """
     if not authorization or not authorization.lower().startswith("bearer "):
         raise HTTPException(
@@ -52,29 +67,35 @@ async def get_current_user(
 
     uid: str = str(claims.get("uid", ""))
     email: str = str(claims.get("email", f"{uid}@unknown"))
+    display_name: str | None = str(claims.get("name")) if claims.get("name") else None
+    user_id = _stable_uuid_from_uid(uid)
+    now = datetime.now(tz=UTC)
+
+    # Upsert the users row so owner_id FK constraints resolve on real Postgres.
+    existing = await db.scalar(select(UserRow).where(UserRow.firebase_uid == uid))
+    if existing is None:
+        db.add(
+            UserRow(
+                id=user_id,
+                firebase_uid=uid,
+                email=email,
+                display_name=display_name,
+                created_at=now,
+            )
+        )
+    else:
+        existing.email = email
+        existing.display_name = display_name
 
     return User(
-        id=_stable_uuid_from_uid(uid),
+        id=user_id,
         email=email,
-        display_name=str(claims.get("name")) if claims.get("name") else None,
-        created_at=datetime.now(tz=UTC),
+        display_name=display_name,
+        created_at=now,
     )
 
 
 CurrentUser = Annotated[User, Depends(get_current_user)]
-
-
-async def get_db_session() -> AsyncIterator[AsyncSession]:
-    """Yield an async SQLAlchemy session. Import lazily to avoid circular deps."""
-    from app.db.session import get_session
-
-    async with get_session() as session:
-        yield session
-
-
-# Convenience alias — routes annotate: `db: DbSession`
-
-DbSession = Annotated[AsyncSession, Depends(get_db_session)]
 
 # Kept for backwards compat with any code that imported the old UUID sentinel.
 _STUB_USER_ID = UUID("00000000-0000-0000-0000-000000000001")
