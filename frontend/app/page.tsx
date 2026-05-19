@@ -134,16 +134,13 @@ export default function HomePage() {
             c ? { ...c, phase: evt.phase, state: evt.state, runId: evt.run_id } : c,
           );
           // Gate has advanced — transition view per SPEC §7.4 (no optimistic UI)
-          if (evt.state === "running") {
-            setView("running");
-          } else if (evt.state === "awaiting_approval") {
-            // will be set by approval.required handler above
-          } else if (
-            evt.state === "approved" ||
-            evt.phase === "done" ||
-            evt.state === "approved"
-          ) {
+          if (evt.state === "approved" || evt.phase === "done") {
             setView("done");
+          } else if (evt.state === "awaiting_approval") {
+            // handled by approval.required event above
+          } else if (evt.state === "running" && evt.phase === "discovery") {
+            // Reject sent us back to discovery — restart the running view
+            setView("running");
           } else if (evt.state === "error") {
             setError("Workflow encountered an error. Check the audit log.");
             setView("error");

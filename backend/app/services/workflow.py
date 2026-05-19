@@ -403,12 +403,14 @@ async def approve_workflow(
         action="phase_1.approved_pool",
         payload={"citation_keys": citation_keys, "count": len(citation_keys)},
     )
+    # Graph ran to END (all Phase 2+ nodes are stubs that complete synchronously).
+    # Emit approved so the frontend knows Phase 1 is complete.
     await _emit(
         project_id,
         {
             "type": "state.changed",
             "phase": Phase.SYNTHESIS.value,
-            "state": "running",
+            "state": "approved",
             "run_id": str(run_id),
         },
     )
@@ -489,7 +491,7 @@ async def override_workflow(
         {
             "type": "state.changed",
             "phase": Phase.SYNTHESIS.value,
-            "state": "running",
+            "state": "approved",
             "run_id": str(run_id),
         },
     )
