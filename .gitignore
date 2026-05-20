@@ -69,3 +69,14 @@ logs/
 # --- Build artifacts ---
 *.tgz
 *.tar.gz
+
+# --- Generated docs (source .md is committed; derived formats are not) ---
+docs/**/*.pdf
+docs/**/*.html
+
+# --- Local tooling / agent skills ---
+.agents/
+skills-lock.json
+
+# --- Internal audit artifacts ---
+phase_1_compliance_report.md
