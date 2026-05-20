@@ -15,7 +15,6 @@ from langgraph.checkpoint.memory import MemorySaver
 
 from app.agents.librarian import LibrarianOutput
 from app.graph.workflow import build_graph
-from app.models.schemas import Phase
 
 TEST_PROJECT_ID = uuid4()
 

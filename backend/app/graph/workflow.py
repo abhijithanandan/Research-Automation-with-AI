@@ -230,8 +230,8 @@ async def create_postgres_checkpointer(
     background asyncio tasks. The pool is owned by the caller — call
     `.conn.close()` on shutdown.
     """
-    from psycopg_pool import AsyncConnectionPool
     from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
+    from psycopg_pool import AsyncConnectionPool
 
     pg_url = database_url.replace("postgresql+asyncpg://", "postgresql://")
     pool = AsyncConnectionPool(conninfo=pg_url, max_size=5, open=False)

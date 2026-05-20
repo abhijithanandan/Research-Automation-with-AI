@@ -18,10 +18,9 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from app.agents.librarian import LibrarianOutput
-from app.graph.state import GraphState
 from app.graph.workflow import build_graph
-from app.models.db import Base, PaperRow, ProjectRow, UserRow, WorkflowRunRow
-from app.models.schemas import Paper, Phase
+from app.models.db import Base, PaperRow, ProjectRow, UserRow
+from app.models.schemas import Paper
 
 # ---------------------------------------------------------------------------
 # Test fixtures

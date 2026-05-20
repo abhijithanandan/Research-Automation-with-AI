@@ -164,6 +164,7 @@ async def test_override_writes_audit_entry(db_session: AsyncSession) -> None:
 async def test_override_passes_artifact_to_graph(db_session: AsyncSession) -> None:
     """override_workflow must pass last_override into the graph Command update via _resume_graph."""
     import asyncio
+
     from langgraph.types import Command
 
     from app.services.workflow import override_workflow
@@ -202,8 +203,9 @@ async def test_override_passes_artifact_to_graph(db_session: AsyncSession) -> No
 @pytest.mark.asyncio
 async def test_override_route_calls_override_workflow(db_session: AsyncSession) -> None:
     """The /override HTTP route must call override_workflow, not approve_workflow."""
-    from httpx import ASGITransport, AsyncClient
     from unittest.mock import patch as _patch
+
+    from httpx import ASGITransport, AsyncClient
 
     from app.api import deps
     from app.models.schemas import User, WorkflowRun
