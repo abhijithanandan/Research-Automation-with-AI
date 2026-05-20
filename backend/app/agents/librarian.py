@@ -162,12 +162,24 @@ def _deduplicate(papers: list[Paper]) -> list[Paper]:
 
     Keeps the first occurrence (prefer Semantic Scholar ordering which tends
     to be more complete). This mirrors the contract in docs/agents/librarian.md.
+
+    DOI detection uses source=="semantic_scholar" as a proxy — Semantic Scholar
+    always sets external_id to the DOI when one exists (extracted from externalIds["DOI"]).
+    ArXiv papers never have a DOI in external_id (it's an arxiv ID like "2310.12345"),
+    so checking "10." in external_id was fragile (2310.12345 matches!).
     """
     seen_dois: set[str] = set()
     unique: list[Paper] = []
 
     for paper in papers:
-        doi = _normalise_doi(paper.external_id if "10." in paper.external_id else None)
+        # Only treat external_id as a DOI when the source explicitly provides one.
+        # Semantic Scholar sets external_id from externalIds["DOI"] when present.
+        # ArXiv IDs (e.g. "2310.12345") look like DOIs but are not.
+        is_doi = (
+            paper.source == "semantic_scholar"
+            and paper.external_id.startswith("10.")
+        )
+        doi = _normalise_doi(paper.external_id if is_doi else None)
 
         if doi:
             if doi in seen_dois:

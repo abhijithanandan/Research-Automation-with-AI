@@ -29,8 +29,12 @@ async def project_events(project_id: UUID, ws: WebSocket) -> None:
     # ---- Auth handshake (SPEC §4) ----------------------------------------
     try:
         first_msg = await asyncio.wait_for(ws.receive_json(), timeout=10.0)
-    except (TimeoutError, Exception):
+    except asyncio.TimeoutError:
         await ws.close(code=4401, reason="auth timeout")
+        return
+    except (WebSocketDisconnect, Exception) as exc:
+        _log.warning("ws_auth_recv_error", error=str(exc))
+        await ws.close(code=4401, reason="auth error")
         return
 
     if first_msg.get("type") != "auth" or not first_msg.get("token"):
@@ -95,5 +99,6 @@ async def project_events(project_id: UUID, ws: WebSocket) -> None:
     except WebSocketDisconnect:
         pass
     finally:
-        unsubscribe_project(project_id)
+        # Pass the specific queue so multi-tab sessions are not broken.
+        unsubscribe_project(project_id, queue)
         _log.info("ws_disconnected", project_id=str(project_id))

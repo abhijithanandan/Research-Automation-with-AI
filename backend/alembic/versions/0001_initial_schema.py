@@ -155,11 +155,19 @@ def upgrade() -> None:
         sa.ForeignKeyConstraint(["workflow_run_id"], ["workflow_runs.id"]),
         sa.PrimaryKeyConstraint("id"),
     )
-    # Performance index matching SPEC.md §2.3
+    # Performance indexes — all FK hot-path columns and common query patterns.
     op.create_index("idx_audit_project", "audit_log", ["project_id", "created_at"], unique=False)
+    op.create_index("idx_projects_owner", "projects", ["owner_id"], unique=False)
+    op.create_index("idx_workflow_runs_project", "workflow_runs", ["project_id", "started_at"], unique=False)
+    op.create_index("idx_papers_project", "papers", ["project_id"], unique=False)
+    op.create_index("idx_artifacts_project_kind", "artifacts", ["project_id", "kind"], unique=False)
 
 
 def downgrade() -> None:
+    op.drop_index("idx_artifacts_project_kind", table_name="artifacts")
+    op.drop_index("idx_papers_project", table_name="papers")
+    op.drop_index("idx_workflow_runs_project", table_name="workflow_runs")
+    op.drop_index("idx_projects_owner", table_name="projects")
     op.drop_index("idx_audit_project", table_name="audit_log")
     op.drop_table("audit_log")
     op.drop_table("artifacts")

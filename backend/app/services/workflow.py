@@ -16,6 +16,7 @@ from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID, uuid4
 
+from fastapi import HTTPException, status
 from langgraph.types import Command
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -26,11 +27,17 @@ from app.models.db import ArtifactRow, AuditLogRow, PaperRow, ProjectRow, Workfl
 from app.models.schemas import Paper, Phase, WorkflowRun
 from app.utils.logging import get_logger
 
+# Module-level set to keep strong references to background tasks (prevents GC).
+_background_tasks: set[asyncio.Task[None]] = set()
+
 _log = get_logger(__name__)
 
 # Module-level compiled graph — initialised in lifespan startup.
 _compiled_graph: Any = None
-_ws_event_bus: dict[UUID, asyncio.Queue[dict[str, object]]] = {}
+
+# Multi-subscriber event bus: project_id → set of queues (one per connected WS client).
+# Using a set allows multiple tabs / reconnections without clobbering each other.
+_ws_event_bus: dict[UUID, set[asyncio.Queue[dict[str, object]]]] = {}
 
 # Last significant event per project — replayed to late WS subscribers so
 # they catch approval.required / state.changed even if they connected after
@@ -58,14 +65,15 @@ async def init_graph(checkpointer: Any) -> None:
 
 
 def subscribe_project(project_id: UUID) -> asyncio.Queue[dict[str, object]]:
-    """Create a project-scoped event queue and replay the last significant event.
+    """Register a new per-connection event queue for project_id.
 
-    Replaying fixes the race where the Librarian finishes and emits
-    approval.required before the frontend WS client has connected.
+    Multiple subscribers (tabs, reconnections) are supported — each gets its
+    own queue. The last significant event is replayed immediately so late
+    subscribers catch up regardless of when they connect.
     """
     q: asyncio.Queue[dict[str, object]] = asyncio.Queue(maxsize=256)
-    _ws_event_bus[project_id] = q
-    # Immediately enqueue the last significant event so late subscribers catch up.
+    _ws_event_bus.setdefault(project_id, set()).add(q)
+    # Replay the last significant event so late subscribers are not stuck.
     cached = _last_event.get(project_id)
     if cached is not None:
         try:
@@ -75,12 +83,17 @@ def subscribe_project(project_id: UUID) -> asyncio.Queue[dict[str, object]]:
     return q
 
 
-def unsubscribe_project(project_id: UUID) -> None:
-    _ws_event_bus.pop(project_id, None)
+def unsubscribe_project(project_id: UUID, q: asyncio.Queue[dict[str, object]]) -> None:
+    """Remove a specific queue from the subscriber set for project_id."""
+    queues = _ws_event_bus.get(project_id)
+    if queues is not None:
+        queues.discard(q)
+        if not queues:
+            del _ws_event_bus[project_id]
 
 
 async def _emit(project_id: UUID, event: dict[str, object]) -> None:
-    """Put an event into the project's WS queue (if anyone is listening).
+    """Fan-out an event to all subscribers for project_id.
 
     Also caches the event if it is a significant type so late WS subscribers
     can be replayed when they connect.
@@ -88,8 +101,7 @@ async def _emit(project_id: UUID, event: dict[str, object]) -> None:
     event["ts"] = datetime.now(tz=UTC).isoformat()
     if event.get("type") in _REPLAY_TYPES:
         _last_event[project_id] = event
-    q = _ws_event_bus.get(project_id)
-    if q is not None:
+    for q in list(_ws_event_bus.get(project_id, set())):
         try:
             q.put_nowait(event)
         except asyncio.QueueFull:
@@ -233,10 +245,15 @@ async def start_workflow(
         .values(status="active", updated_at=now)
     )
 
+    # Commit now so _run_graph's fresh session sees the new WorkflowRunRow.
+    # Without this, the background task could start before the row is visible.
+    await session.commit()
+
     # Dispatch the graph in the background so the HTTP response returns quickly.
-    asyncio.create_task(  # noqa: RUF006
-        _run_graph(run.id, project_id, project.seed_query)
-    )
+    # Keep a strong reference to prevent the task being GC'd before completion.
+    task = asyncio.create_task(_run_graph(run.id, project_id, project.seed_query))
+    _background_tasks.add(task)
+    task.add_done_callback(_background_tasks.discard)
 
     return _run_to_schema(run)
 
@@ -342,8 +359,10 @@ async def approve_workflow(
 
     Hydrates state["approved_pool"] from DB-approved papers (SPEC §5.2, §6.2)
     and writes a phase_1.approved_pool audit entry for the audit trail.
+    Graph resume is dispatched to a background task so the HTTP handler returns
+    immediately without blocking on the next phase's LLM calls.
     """
-    run = await _assert_awaiting(session, run_id)
+    await _assert_awaiting(session, run_id)
 
     # Build the approved pool from DB — these are the papers the user toggled
     # via PATCH /papers/{id} before calling approve.
@@ -376,15 +395,6 @@ async def approve_workflow(
     ]
     citation_keys = [r.citation_key for r in approved_rows]
 
-    graph = get_compiled_graph()
-    config = {"configurable": {"thread_id": str(run_id)}}
-
-    # Pass approved_pool into the graph state on resume so Phase 2 (Critic) can read it.
-    await graph.ainvoke(
-        Command(resume="approve", update={"approved_pool": approved_pool}),
-        config,
-    )
-
     await _update_run_state(session, run_id, "approved")
     await _write_audit(
         session,
@@ -394,7 +404,6 @@ async def approve_workflow(
         action="user.approve",
         payload={"user_id": str(user_id), "feedback": feedback},
     )
-    # Audit entry for the approved pool snapshot (SPEC §7.3 audit-trail completeness).
     await _write_audit(
         session,
         project_id=project_id,
@@ -403,18 +412,23 @@ async def approve_workflow(
         action="phase_1.approved_pool",
         payload={"citation_keys": citation_keys, "count": len(citation_keys)},
     )
-    # Graph ran to END (all Phase 2+ nodes are stubs that complete synchronously).
-    # Emit approved so the frontend knows Phase 1 is complete.
-    await _emit(
-        project_id,
-        {
-            "type": "state.changed",
-            "phase": Phase.SYNTHESIS.value,
-            "state": "approved",
-            "run_id": str(run_id),
-        },
+    # Commit so the background task sees the updated state.
+    await session.commit()
+
+    # Dispatch graph resume to background — the next phase may involve long LLM calls.
+    graph = get_compiled_graph()
+    config = {"configurable": {"thread_id": str(run_id)}}
+    task = asyncio.create_task(
+        _resume_graph(project_id, run_id, graph, config,
+                      Command(resume="approve", update={"approved_pool": approved_pool}),
+                      "approved")
     )
-    return _run_to_schema(run)
+    _background_tasks.add(task)
+    task.add_done_callback(_background_tasks.discard)
+
+    # Return the freshly updated run state.
+    run = await session.get(WorkflowRunRow, run_id)
+    return _run_to_schema(run)  # type: ignore[arg-type]
 
 
 async def override_workflow(
@@ -430,10 +444,10 @@ async def override_workflow(
     """Submit a manually-edited artifact and advance the gate.
 
     Writes an ArtifactRow (produced_by='human') and an audit entry
-    (action='user.override'), then resumes the graph with the artifact
-    injected into state['last_override'] (SPEC §7.3, state-machine §Reject vs Override).
+    (action='user.override'), then resumes the graph in the background with the
+    artifact injected into state['last_override'] (SPEC §7.3).
     """
-    run = await _assert_awaiting(session, run_id)
+    await _assert_awaiting(session, run_id)
 
     now = datetime.now(tz=UTC)
     artifact = ArtifactRow(
@@ -447,7 +461,7 @@ async def override_workflow(
         created_at=now,
     )
     session.add(artifact)
-    await session.flush()  # ensure artifact.id is available for the audit payload
+    await session.flush()
 
     await _write_audit(
         session,
@@ -463,8 +477,6 @@ async def override_workflow(
         },
     )
 
-    # Build the Artifact dict for state injection (must be a plain dict for
-    # LangGraph checkpoint serialisation — Pydantic models are not supported).
     artifact_state = {
         "id": str(artifact.id),
         "project_id": str(project_id),
@@ -477,25 +489,21 @@ async def override_workflow(
         "created_at": now.isoformat(),
     }
 
+    await _update_run_state(session, run_id, "approved")
+    await session.commit()
+
     graph = get_compiled_graph()
     config = {"configurable": {"thread_id": str(run_id)}}
-
-    await graph.ainvoke(
-        Command(resume="approve", update={"last_override": artifact_state}),
-        config,
+    task = asyncio.create_task(
+        _resume_graph(project_id, run_id, graph, config,
+                      Command(resume="approve", update={"last_override": artifact_state}),
+                      "approved")
     )
+    _background_tasks.add(task)
+    task.add_done_callback(_background_tasks.discard)
 
-    await _update_run_state(session, run_id, "approved")
-    await _emit(
-        project_id,
-        {
-            "type": "state.changed",
-            "phase": Phase.SYNTHESIS.value,
-            "state": "approved",
-            "run_id": str(run_id),
-        },
-    )
-    return _run_to_schema(run)
+    run = await session.get(WorkflowRunRow, run_id)
+    return _run_to_schema(run)  # type: ignore[arg-type]
 
 
 async def reject_workflow(
@@ -505,12 +513,12 @@ async def reject_workflow(
     user_id: UUID,
     feedback: str,
 ) -> WorkflowRun:
-    """Resume the graph with a reject command (re-runs discover with feedback)."""
-    run = await _assert_awaiting(session, run_id)
+    """Resume the graph with a reject command (re-runs discover with feedback).
 
-    graph = get_compiled_graph()
-    config = {"configurable": {"thread_id": str(run_id)}}
-    await graph.ainvoke(Command(resume="reject"), config)
+    Graph resume is dispatched to a background task so the HTTP handler
+    returns immediately.
+    """
+    await _assert_awaiting(session, run_id)
 
     await _update_run_state(session, run_id, "rejected")
     await _write_audit(
@@ -521,16 +529,20 @@ async def reject_workflow(
         action="user.reject",
         payload={"user_id": str(user_id), "feedback": feedback},
     )
-    await _emit(
-        project_id,
-        {
-            "type": "state.changed",
-            "phase": Phase.DISCOVERY.value,
-            "state": "running",
-            "run_id": str(run_id),
-        },
+    await session.commit()
+
+    graph = get_compiled_graph()
+    config = {"configurable": {"thread_id": str(run_id)}}
+    task = asyncio.create_task(
+        _resume_graph(project_id, run_id, graph, config,
+                      Command(resume="reject"),
+                      "running")
     )
-    return _run_to_schema(run)
+    _background_tasks.add(task)
+    task.add_done_callback(_background_tasks.discard)
+
+    run = await session.get(WorkflowRunRow, run_id)
+    return _run_to_schema(run)  # type: ignore[arg-type]
 
 
 async def get_active_run(session: AsyncSession, project_id: UUID) -> WorkflowRunRow | None:
@@ -549,15 +561,52 @@ async def get_active_run(session: AsyncSession, project_id: UUID) -> WorkflowRun
 
 
 async def _assert_awaiting(session: AsyncSession, run_id: UUID) -> WorkflowRunRow:
-    """Raise if the run is not in awaiting_approval state (SPEC §7 rule 2)."""
+    """Raise HTTP 409 if the run is not in awaiting_approval state (SPEC §7 rule 2)."""
     run = await session.get(WorkflowRunRow, run_id)
     if run is None:
-        raise ValueError(f"WorkflowRun {run_id} not found")
+        raise HTTPException(status.HTTP_404_NOT_FOUND, f"WorkflowRun {run_id} not found")
     if run.state != "awaiting_approval":
-        raise PermissionError(
-            f"WorkflowRun {run_id} is in state '{run.state}', not 'awaiting_approval'."
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            detail={
+                "code": "phase_locked",
+                "message": f"WorkflowRun is in state '{run.state}', not 'awaiting_approval'.",
+            },
         )
     return run
+
+
+async def _resume_graph(
+    project_id: UUID,
+    run_id: UUID,
+    graph: Any,
+    config: dict[str, Any],
+    command: Command,
+    done_state: str,
+) -> None:
+    """Run graph.ainvoke in a background task and emit the completion event."""
+    try:
+        await graph.ainvoke(command, config)
+        ws_state = "approved" if done_state == "approved" else "running"
+        ws_phase = Phase.SYNTHESIS.value if done_state == "approved" else Phase.DISCOVERY.value
+        await _emit(
+            project_id,
+            {
+                "type": "state.changed",
+                "phase": ws_phase,
+                "state": ws_state,
+                "run_id": str(run_id),
+            },
+        )
+    except Exception as exc:
+        _log.error("graph_resume_error", run_id=str(run_id), error=str(exc))
+        from app.db.session import get_session
+        async with get_session() as bg_session:
+            await _update_run_state(bg_session, run_id, "error")
+        await _emit(
+            project_id,
+            {"type": "agent.error", "run_id": str(run_id), "error": str(exc)},
+        )
 
 
 def _run_to_schema(run: WorkflowRunRow) -> WorkflowRun:
