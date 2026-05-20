@@ -187,9 +187,7 @@ class ArXivAdapter:
 
             abstract_el = entry.find("atom:summary", ns)
             abstract = (
-                abstract_el.text.strip()
-                if abstract_el is not None and abstract_el.text
-                else None
+                abstract_el.text.strip() if abstract_el is not None and abstract_el.text else None
             )
 
             published_el = entry.find("atom:published", ns)

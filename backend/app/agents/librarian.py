@@ -175,10 +175,7 @@ def _deduplicate(papers: list[Paper]) -> list[Paper]:
         # Only treat external_id as a DOI when the source explicitly provides one.
         # Semantic Scholar sets external_id from externalIds["DOI"] when present.
         # ArXiv IDs (e.g. "2310.12345") look like DOIs but are not.
-        is_doi = (
-            paper.source == "semantic_scholar"
-            and paper.external_id.startswith("10.")
-        )
+        is_doi = paper.source == "semantic_scholar" and paper.external_id.startswith("10.")
         doi = _normalise_doi(paper.external_id if is_doi else None)
 
         if doi:

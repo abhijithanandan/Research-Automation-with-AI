@@ -140,6 +140,7 @@ async def test_approve_workflow_writes_approved_pool_to_state(db_session: AsyncS
                     await approve_workflow(db_session, TEST_PROJECT_ID, TEST_RUN_ID, TEST_USER_ID)
                     # Flush the event loop so create_task runs the coroutine.
                     import asyncio
+
                     await asyncio.sleep(0)
 
     # The Command passed to _resume_graph must include approved papers in update.
@@ -163,6 +164,7 @@ async def test_approve_workflow_writes_audit_pool_entry(db_session: AsyncSession
                 with patch("app.services.workflow._resume_graph", new_callable=AsyncMock):
                     await approve_workflow(db_session, TEST_PROJECT_ID, TEST_RUN_ID, TEST_USER_ID)
                     import asyncio
+
                     await asyncio.sleep(0)
 
     await db_session.flush()

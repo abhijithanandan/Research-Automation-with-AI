@@ -127,7 +127,6 @@ async def _assert_owned(db: DbSession, project_id: UUID, user_id: UUID) -> None:
 
 
 def _artifact_to_schema(row: ArtifactRow) -> Artifact:
-
     return Artifact(
         id=row.id,
         project_id=row.project_id,

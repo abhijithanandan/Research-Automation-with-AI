@@ -158,7 +158,9 @@ def upgrade() -> None:
     # Performance indexes — all FK hot-path columns and common query patterns.
     op.create_index("idx_audit_project", "audit_log", ["project_id", "created_at"], unique=False)
     op.create_index("idx_projects_owner", "projects", ["owner_id"], unique=False)
-    op.create_index("idx_workflow_runs_project", "workflow_runs", ["project_id", "started_at"], unique=False)
+    op.create_index(
+        "idx_workflow_runs_project", "workflow_runs", ["project_id", "started_at"], unique=False
+    )
     op.create_index("idx_papers_project", "papers", ["project_id"], unique=False)
     op.create_index("idx_artifacts_project_kind", "artifacts", ["project_id", "kind"], unique=False)
 

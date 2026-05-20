@@ -178,7 +178,9 @@ async def test_run_graph_persists_papers() -> None:
     with patch("app.graph.workflow.Librarian") as mock_lib:
         mock_lib.return_value.run = AsyncMock(return_value=mock_output)
 
-        with patch("app.services.workflow._persist_candidates", new_callable=AsyncMock) as mock_persist:
+        with patch(
+            "app.services.workflow._persist_candidates", new_callable=AsyncMock
+        ) as mock_persist:
             with patch("app.services.workflow.get_compiled_graph", return_value=graph):
                 # get_session is a late import inside _run_graph — patch at the source module.
                 with patch("app.db.session.get_session") as mock_get_session:
@@ -189,7 +191,9 @@ async def test_run_graph_persists_papers() -> None:
                     mock_get_session.return_value = mock_ctx
 
                     with patch("app.services.workflow._emit", new_callable=AsyncMock):
-                        with patch("app.services.workflow._update_run_state", new_callable=AsyncMock):
+                        with patch(
+                            "app.services.workflow._update_run_state", new_callable=AsyncMock
+                        ):
                             from app.services.workflow import _run_graph
 
                             await _run_graph(run_id, TEST_PROJECT_ID, "test query")

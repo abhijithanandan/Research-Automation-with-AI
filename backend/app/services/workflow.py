@@ -155,13 +155,17 @@ async def _persist_candidates(
     for paper in papers:
         # Check if a row with this (project_id, citation_key) already exists.
         existing = (
-            await session.execute(
-                select(PaperRow).where(
-                    PaperRow.project_id == project_id,
-                    PaperRow.citation_key == paper.citation_key,
+            (
+                await session.execute(
+                    select(PaperRow).where(
+                        PaperRow.project_id == project_id,
+                        PaperRow.citation_key == paper.citation_key,
+                    )
                 )
             )
-        ).scalars().first()
+            .scalars()
+            .first()
+        )
         if existing is not None:
             continue
         row = PaperRow(
@@ -367,13 +371,17 @@ async def approve_workflow(
     # Build the approved pool from DB — these are the papers the user toggled
     # via PATCH /papers/{id} before calling approve.
     approved_rows = (
-        await session.execute(
-            select(PaperRow).where(
-                PaperRow.project_id == project_id,
-                PaperRow.approved.is_(True),
+        (
+            await session.execute(
+                select(PaperRow).where(
+                    PaperRow.project_id == project_id,
+                    PaperRow.approved.is_(True),
+                )
             )
         )
-    ).scalars().all()
+        .scalars()
+        .all()
+    )
 
     approved_pool = [
         {
@@ -419,9 +427,14 @@ async def approve_workflow(
     graph = get_compiled_graph()
     config = {"configurable": {"thread_id": str(run_id)}}
     task = asyncio.create_task(
-        _resume_graph(project_id, run_id, graph, config,
-                      Command(resume="approve", update={"approved_pool": approved_pool}),
-                      "approved")
+        _resume_graph(
+            project_id,
+            run_id,
+            graph,
+            config,
+            Command(resume="approve", update={"approved_pool": approved_pool}),
+            "approved",
+        )
     )
     _background_tasks.add(task)
     task.add_done_callback(_background_tasks.discard)
@@ -495,9 +508,14 @@ async def override_workflow(
     graph = get_compiled_graph()
     config = {"configurable": {"thread_id": str(run_id)}}
     task = asyncio.create_task(
-        _resume_graph(project_id, run_id, graph, config,
-                      Command(resume="approve", update={"last_override": artifact_state}),
-                      "approved")
+        _resume_graph(
+            project_id,
+            run_id,
+            graph,
+            config,
+            Command(resume="approve", update={"last_override": artifact_state}),
+            "approved",
+        )
     )
     _background_tasks.add(task)
     task.add_done_callback(_background_tasks.discard)
@@ -534,9 +552,7 @@ async def reject_workflow(
     graph = get_compiled_graph()
     config = {"configurable": {"thread_id": str(run_id)}}
     task = asyncio.create_task(
-        _resume_graph(project_id, run_id, graph, config,
-                      Command(resume="reject"),
-                      "running")
+        _resume_graph(project_id, run_id, graph, config, Command(resume="reject"), "running")
     )
     _background_tasks.add(task)
     task.add_done_callback(_background_tasks.discard)
@@ -602,6 +618,7 @@ async def _resume_graph(
         _log.error("graph_resume_error", run_id=str(run_id), error=str(exc))
         # Late import mirrors the pattern used by _run_graph to avoid circular deps.
         from app.db.session import get_session
+
         async with get_session() as bg_session:
             await _update_run_state(bg_session, run_id, "error")
         await _emit(
@@ -611,7 +628,6 @@ async def _resume_graph(
 
 
 def _run_to_schema(run: WorkflowRunRow) -> WorkflowRun:
-
     return WorkflowRun(
         id=run.id,
         project_id=run.project_id,
