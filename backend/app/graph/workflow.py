@@ -14,7 +14,7 @@ workflow REST endpoint.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, cast
 
 from langgraph.graph import END, StateGraph
 from langgraph.types import interrupt
@@ -174,7 +174,7 @@ def build_graph(checkpointer: Any) -> Any:
     after `node_await_pool_approval` hands control to LangGraph's interrupt
     mechanism.
     """
-    g: StateGraph[GraphState] = StateGraph(GraphState)
+    g = StateGraph(GraphState)
 
     # Register nodes
     g.add_node(NODE_DISCOVER, node_discover)
@@ -231,17 +231,21 @@ async def create_postgres_checkpointer(
     `.conn.close()` on shutdown.
     """
     from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
+    from psycopg import AsyncConnection
     from psycopg.rows import dict_row
     from psycopg_pool import AsyncConnectionPool
 
     pg_url = database_url.replace("postgresql+asyncpg://", "postgresql://")
-    pool = AsyncConnectionPool(
-        conninfo=pg_url,
-        max_size=5,
-        open=False,
-        kwargs={"row_factory": dict_row},
+    _pool: AsyncConnectionPool[AsyncConnection[dict[str, Any]]] = cast(
+        "AsyncConnectionPool[AsyncConnection[dict[str, Any]]]",
+        AsyncConnectionPool(
+            conninfo=pg_url,
+            max_size=5,
+            open=False,
+            kwargs={"row_factory": dict_row},
+        ),
     )
-    await pool.open()
-    saver = AsyncPostgresSaver(conn=pool)
+    await _pool.open()
+    saver = AsyncPostgresSaver(conn=_pool)
     await saver.setup()
     return saver

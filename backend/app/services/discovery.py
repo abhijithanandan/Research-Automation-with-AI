@@ -106,7 +106,7 @@ class SemanticScholarAdapter:
             papers.append(
                 Paper(
                     id=uuid4(),
-                    project_id=None,  # type: ignore[arg-type]
+                    project_id=None,
                     source="semantic_scholar",
                     external_id=external_id,
                     title=item.get("title") or "",
@@ -211,7 +211,7 @@ class ArXivAdapter:
             papers.append(
                 Paper(
                     id=uuid4(),
-                    project_id=None,  # type: ignore[arg-type]
+                    project_id=None,
                     source="arxiv",
                     external_id=arxiv_id,
                     title=title,
