@@ -29,7 +29,7 @@ async def project_events(project_id: UUID, ws: WebSocket) -> None:
     # ---- Auth handshake (SPEC §4) ----------------------------------------
     try:
         first_msg = await asyncio.wait_for(ws.receive_json(), timeout=10.0)
-    except asyncio.TimeoutError:
+    except TimeoutError:
         await ws.close(code=4401, reason="auth timeout")
         return
     except (WebSocketDisconnect, Exception) as exc:

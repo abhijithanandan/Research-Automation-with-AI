@@ -119,57 +119,30 @@ async def db_session() -> AsyncIterator[AsyncSession]:
 
 @pytest.mark.asyncio
 async def test_approve_workflow_writes_approved_pool_to_state(db_session: AsyncSession) -> None:
-    """approve_workflow must pass approved papers into state["approved_pool"] via Command."""
-    from langgraph.checkpoint.memory import MemorySaver
+    """approve_workflow must pass approved papers into state["approved_pool"] via Command.
+
+    Graph resume is now dispatched via _resume_graph in a background task.
+    We patch _resume_graph to capture the Command synchronously.
+    """
     from langgraph.types import Command
 
-    from app.graph.state import GraphState
-    from app.graph.workflow import build_graph
-    from app.models.schemas import Phase
     from app.services.workflow import approve_workflow
 
-    # Build a real graph so ainvoke works.
-    graph = build_graph(MemorySaver())
-    config = {"configurable": {"thread_id": str(TEST_RUN_ID)}}
-
-    # Pre-seed a checkpoint at the gate so ainvoke(Command(resume=...)) works.
-    with patch("app.graph.workflow.Librarian") as mock_lib:
-        mock_lib.return_value.run = AsyncMock(
-            return_value=MagicMock(candidates=[], expanded_queries=[], arxiv_categories=[])
-        )
-        initial: GraphState = {
-            "project_id": TEST_PROJECT_ID,
-            "workflow_run_id": TEST_RUN_ID,
-            "seed_query": "test",
-            "phase": Phase.DISCOVERY,
-            "candidates": [],
-            "approved_pool": [],
-            "awaiting_approval": False,
-            "last_feedback": None,
-            "last_override": None,
-            "expanded_queries": [],
-            "sections_done": [],
-            "sections_remaining": [],
-            "drafts": [],
-            "matrix": None,
-            "summary": None,
-        }
-        await graph.ainvoke(initial, config)
-
     captured_command: list[Command] = []
-    original_ainvoke = graph.ainvoke
 
-    async def spy_ainvoke(cmd, cfg):
-        captured_command.append(cmd)
-        return await original_ainvoke(cmd, cfg)
+    async def spy_resume(project_id, run_id, graph, config, command, done_state):
+        captured_command.append(command)
 
     with patch("app.services.workflow._emit", new_callable=AsyncMock):
         with patch("app.services.workflow._update_run_state", new_callable=AsyncMock):
-            with patch.object(graph, "ainvoke", side_effect=spy_ainvoke):
-                with patch("app.services.workflow.get_compiled_graph", return_value=graph):
+            with patch("app.services.workflow.get_compiled_graph", return_value=MagicMock()):
+                with patch("app.services.workflow._resume_graph", side_effect=spy_resume):
                     await approve_workflow(db_session, TEST_PROJECT_ID, TEST_RUN_ID, TEST_USER_ID)
+                    # Flush the event loop so create_task runs the coroutine.
+                    import asyncio
+                    await asyncio.sleep(0)
 
-    # The Command passed to ainvoke must include approved papers in update.
+    # The Command passed to _resume_graph must include approved papers in update.
     assert len(captured_command) == 1
     cmd = captured_command[0]
     assert cmd.resume == "approve"
@@ -182,43 +155,15 @@ async def test_approve_workflow_writes_approved_pool_to_state(db_session: AsyncS
 @pytest.mark.asyncio
 async def test_approve_workflow_writes_audit_pool_entry(db_session: AsyncSession) -> None:
     """approve_workflow must write an audit entry with action='phase_1.approved_pool'."""
-    from langgraph.checkpoint.memory import MemorySaver
-
-    from app.graph.state import GraphState
-    from app.graph.workflow import build_graph
-    from app.models.schemas import Phase
     from app.services.workflow import approve_workflow
-
-    graph = build_graph(MemorySaver())
-    config = {"configurable": {"thread_id": str(TEST_RUN_ID)}}
-
-    with patch("app.graph.workflow.Librarian") as mock_lib:
-        mock_lib.return_value.run = AsyncMock(
-            return_value=MagicMock(candidates=[], expanded_queries=[], arxiv_categories=[])
-        )
-        initial: GraphState = {
-            "project_id": TEST_PROJECT_ID,
-            "workflow_run_id": TEST_RUN_ID,
-            "seed_query": "test",
-            "phase": Phase.DISCOVERY,
-            "candidates": [],
-            "approved_pool": [],
-            "awaiting_approval": False,
-            "last_feedback": None,
-            "last_override": None,
-            "expanded_queries": [],
-            "sections_done": [],
-            "sections_remaining": [],
-            "drafts": [],
-            "matrix": None,
-            "summary": None,
-        }
-        await graph.ainvoke(initial, config)
 
     with patch("app.services.workflow._emit", new_callable=AsyncMock):
         with patch("app.services.workflow._update_run_state", new_callable=AsyncMock):
-            with patch("app.services.workflow.get_compiled_graph", return_value=graph):
-                await approve_workflow(db_session, TEST_PROJECT_ID, TEST_RUN_ID, TEST_USER_ID)
+            with patch("app.services.workflow.get_compiled_graph", return_value=MagicMock()):
+                with patch("app.services.workflow._resume_graph", new_callable=AsyncMock):
+                    await approve_workflow(db_session, TEST_PROJECT_ID, TEST_RUN_ID, TEST_USER_ID)
+                    import asyncio
+                    await asyncio.sleep(0)
 
     await db_session.flush()
 

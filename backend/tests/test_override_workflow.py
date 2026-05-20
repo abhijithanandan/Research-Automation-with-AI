@@ -80,25 +80,25 @@ async def db_session() -> AsyncIterator[AsyncSession]:
 @pytest.mark.asyncio
 async def test_override_writes_artifact_row(db_session: AsyncSession) -> None:
     """override_workflow must persist an ArtifactRow with produced_by='human'."""
+    import asyncio
+
     from app.services.workflow import override_workflow
 
     with patch("app.services.workflow._emit", new_callable=AsyncMock):
         with patch("app.services.workflow._update_run_state", new_callable=AsyncMock):
-            with patch("app.services.workflow.get_compiled_graph") as mock_gc:
-                mock_graph = MagicMock()
-                mock_graph.ainvoke = AsyncMock()
-                mock_gc.return_value = mock_graph
-
-                await override_workflow(
-                    db_session,
-                    project_id=TEST_PROJECT_ID,
-                    run_id=TEST_RUN_ID,
-                    user_id=TEST_USER_ID,
-                    artifact_kind="log",
-                    label="Manual override",
-                    content="Manually curated pool.",
-                    mime_type="text/plain",
-                )
+            with patch("app.services.workflow.get_compiled_graph", return_value=MagicMock()):
+                with patch("app.services.workflow._resume_graph", new_callable=AsyncMock):
+                    await override_workflow(
+                        db_session,
+                        project_id=TEST_PROJECT_ID,
+                        run_id=TEST_RUN_ID,
+                        user_id=TEST_USER_ID,
+                        artifact_kind="log",
+                        label="Manual override",
+                        content="Manually curated pool.",
+                        mime_type="text/plain",
+                    )
+                    await asyncio.sleep(0)
 
     await db_session.flush()
 
@@ -121,25 +121,25 @@ async def test_override_writes_artifact_row(db_session: AsyncSession) -> None:
 @pytest.mark.asyncio
 async def test_override_writes_audit_entry(db_session: AsyncSession) -> None:
     """override_workflow must write an audit entry with action='user.override'."""
+    import asyncio
+
     from app.services.workflow import override_workflow
 
     with patch("app.services.workflow._emit", new_callable=AsyncMock):
         with patch("app.services.workflow._update_run_state", new_callable=AsyncMock):
-            with patch("app.services.workflow.get_compiled_graph") as mock_gc:
-                mock_graph = MagicMock()
-                mock_graph.ainvoke = AsyncMock()
-                mock_gc.return_value = mock_graph
-
-                await override_workflow(
-                    db_session,
-                    project_id=TEST_PROJECT_ID,
-                    run_id=TEST_RUN_ID,
-                    user_id=TEST_USER_ID,
-                    artifact_kind="summary",
-                    label="Curated summary",
-                    content="# Summary\n...",
-                    mime_type="text/markdown",
-                )
+            with patch("app.services.workflow.get_compiled_graph", return_value=MagicMock()):
+                with patch("app.services.workflow._resume_graph", new_callable=AsyncMock):
+                    await override_workflow(
+                        db_session,
+                        project_id=TEST_PROJECT_ID,
+                        run_id=TEST_RUN_ID,
+                        user_id=TEST_USER_ID,
+                        artifact_kind="summary",
+                        label="Curated summary",
+                        content="# Summary\n...",
+                        mime_type="text/markdown",
+                    )
+                    await asyncio.sleep(0)
 
     await db_session.flush()
 
@@ -162,33 +162,32 @@ async def test_override_writes_audit_entry(db_session: AsyncSession) -> None:
 
 @pytest.mark.asyncio
 async def test_override_passes_artifact_to_graph(db_session: AsyncSession) -> None:
-    """override_workflow must pass last_override into the graph Command update."""
+    """override_workflow must pass last_override into the graph Command update via _resume_graph."""
+    import asyncio
     from langgraph.types import Command
 
     from app.services.workflow import override_workflow
 
     captured: list[Command] = []
 
-    async def spy_ainvoke(cmd, cfg):
-        captured.append(cmd)
+    async def spy_resume(project_id, run_id, graph, config, command, done_state):
+        captured.append(command)
 
     with patch("app.services.workflow._emit", new_callable=AsyncMock):
         with patch("app.services.workflow._update_run_state", new_callable=AsyncMock):
-            with patch("app.services.workflow.get_compiled_graph") as mock_gc:
-                mock_graph = MagicMock()
-                mock_graph.ainvoke = AsyncMock(side_effect=spy_ainvoke)
-                mock_gc.return_value = mock_graph
-
-                await override_workflow(
-                    db_session,
-                    project_id=TEST_PROJECT_ID,
-                    run_id=TEST_RUN_ID,
-                    user_id=TEST_USER_ID,
-                    artifact_kind="matrix",
-                    label="Human matrix",
-                    content="row1,row2",
-                    mime_type="text/csv",
-                )
+            with patch("app.services.workflow.get_compiled_graph", return_value=MagicMock()):
+                with patch("app.services.workflow._resume_graph", side_effect=spy_resume):
+                    await override_workflow(
+                        db_session,
+                        project_id=TEST_PROJECT_ID,
+                        run_id=TEST_RUN_ID,
+                        user_id=TEST_USER_ID,
+                        artifact_kind="matrix",
+                        label="Human matrix",
+                        content="row1,row2",
+                        mime_type="text/csv",
+                    )
+                    await asyncio.sleep(0)
 
     assert len(captured) == 1
     cmd = captured[0]

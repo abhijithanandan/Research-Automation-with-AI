@@ -600,7 +600,8 @@ async def _resume_graph(
         )
     except Exception as exc:
         _log.error("graph_resume_error", run_id=str(run_id), error=str(exc))
-        from app.db.session import get_session
+        # Late import mirrors the pattern used by _run_graph to avoid circular deps.
+        from app.db.session import get_session  # noqa: PLC0415
         async with get_session() as bg_session:
             await _update_run_state(bg_session, run_id, "error")
         await _emit(
