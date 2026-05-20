@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 from pydantic import BaseModel
 
@@ -29,7 +29,8 @@ class Critic(Agent[CriticInput, CriticOutput]):
         # TODO: build comparison matrix via structured LLM call.
         # TODO: produce narrative summary via RAG over the approved pool.
         now = datetime.now(tz=UTC)
-        project_id = payload.approved_papers[0].project_id if payload.approved_papers else uuid4()
+        pid = payload.approved_papers[0].project_id if payload.approved_papers else None
+        project_id: UUID = pid if pid is not None else uuid4()
         matrix = Artifact(
             id=uuid4(),
             project_id=project_id,

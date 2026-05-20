@@ -308,7 +308,7 @@ async def _run_graph(
         # ainvoke returns (does not raise) when the graph hits interrupt().
         # Persist the candidate papers then update DB state to awaiting_approval.
         graph_state = await graph.aget_state(config)
-        candidates_raw: list[dict] = graph_state.values.get("candidates", [])
+        candidates_raw: list[dict[str, Any]] = graph_state.values.get("candidates", [])
         candidate_papers = [Paper(**d) for d in candidates_raw]
 
         async with get_session() as bg_session:
@@ -597,7 +597,7 @@ async def _resume_graph(
     run_id: UUID,
     graph: Any,
     config: dict[str, Any],
-    command: Command,
+    command: Command[Any],
     done_state: str,
 ) -> None:
     """Run graph.ainvoke in a background task and emit the completion event."""

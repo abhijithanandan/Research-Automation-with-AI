@@ -231,10 +231,16 @@ async def create_postgres_checkpointer(
     `.conn.close()` on shutdown.
     """
     from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
+    from psycopg.rows import dict_row
     from psycopg_pool import AsyncConnectionPool
 
     pg_url = database_url.replace("postgresql+asyncpg://", "postgresql://")
-    pool = AsyncConnectionPool(conninfo=pg_url, max_size=5, open=False)
+    pool = AsyncConnectionPool(
+        conninfo=pg_url,
+        max_size=5,
+        open=False,
+        kwargs={"row_factory": dict_row},
+    )
     await pool.open()
     saver = AsyncPostgresSaver(conn=pool)
     await saver.setup()

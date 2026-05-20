@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from typing import Literal
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 from pydantic import BaseModel
 
@@ -42,7 +42,8 @@ class Scribe(Agent[ScribeInput, ScribeOutput]):
         # TODO: RAG over approved_pool; constrain prompt to cite only approved keys.
         # TODO: validate cited_keys ⊆ {p.citation_key for p in approved_pool}.
         now = datetime.now(tz=UTC)
-        project_id = payload.approved_pool[0].project_id if payload.approved_pool else uuid4()
+        pid = payload.approved_pool[0].project_id if payload.approved_pool else None
+        project_id: UUID = pid if pid is not None else uuid4()
         artifact = Artifact(
             id=uuid4(),
             project_id=project_id,
