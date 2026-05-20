@@ -72,7 +72,7 @@ async def test_arxiv_adapter_handles_5xx() -> None:
         respx.get("http://export.arxiv.org/api/query").mock(return_value=httpx.Response(503))
         adapter = ArXivAdapter()
         # Disable tenacity retries for the test to keep it fast.
-        adapter.search.retry.stop = lambda *_: True  # type: ignore[attr-defined]
+        adapter._search_with_retry.retry.stop = lambda *_: True  # type: ignore[attr-defined]
         async with httpx.AsyncClient() as client:
             papers = await adapter.search("query", max_results=10, client=client)
 

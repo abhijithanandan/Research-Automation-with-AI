@@ -13,5 +13,8 @@ ruff format --check .
 echo "==> mypy"
 mypy app
 
+echo "==> pytest with coverage"
+pytest --cov=app --cov-report=term-missing --cov-report=annotate:cov_annotate -q
+
 echo ""
 echo "All checks passed."

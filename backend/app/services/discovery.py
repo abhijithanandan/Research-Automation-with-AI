@@ -18,7 +18,7 @@ from typing import Protocol
 from uuid import uuid4
 
 import httpx
-from tenacity import retry, stop_after_attempt, wait_exponential
+from tenacity import RetryError, retry, stop_after_attempt, wait_exponential
 
 from app.config import get_settings
 from app.models.schemas import Paper
@@ -137,8 +137,22 @@ _ARXIV_OAI = "http://arxiv.org/schemas/atom"
 class ArXivAdapter:
     """Queries the ArXiv Atom Feed API (no API key required)."""
 
-    @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=1, max=8))
     async def search(
+        self,
+        query: str,
+        max_results: int,
+        client: httpx.AsyncClient,
+        categories: list[str] | None = None,
+    ) -> list[Paper]:
+        """Public entry point — wraps the retried inner call, returns [] on exhaustion."""
+        try:
+            return await self._search_with_retry(query, max_results, client, categories)
+        except RetryError:
+            _log.warning("arxiv_retry_exhausted", query=query)
+            return []
+
+    @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=1, max=8))
+    async def _search_with_retry(
         self,
         query: str,
         max_results: int,

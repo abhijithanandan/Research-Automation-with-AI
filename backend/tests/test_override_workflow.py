@@ -237,21 +237,36 @@ async def test_override_route_calls_override_workflow(db_session: AsyncSession) 
         last_event_at=datetime.now(tz=UTC),
     )
 
+    active_run = WorkflowRun(
+        id=TEST_RUN_ID,
+        project_id=TEST_PROJECT_ID,
+        phase=Phase.DISCOVERY,
+        state="awaiting_approval",
+        checkpoint_id="ckpt",
+        started_at=datetime.now(tz=UTC),
+        last_event_at=datetime.now(tz=UTC),
+    )
+
     with _patch("app.services.workflow.override_workflow", new_callable=AsyncMock) as mock_ov:
         mock_ov.return_value = mock_return
-
-        transport = ASGITransport(app=app)
-        async with AsyncClient(transport=transport, base_url="http://test") as client:
-            resp = await client.post(
-                f"/api/v1/projects/{TEST_PROJECT_ID}/workflow/override",
-                json={
-                    "artifact_kind": "log",
-                    "label": "Test override",
-                    "content": "content",
-                    "mime_type": "text/plain",
-                },
-                headers={"Authorization": "Bearer test-token"},
-            )
+        with _patch("app.api.routes.workflow._assert_project_owned", new_callable=AsyncMock):
+            with _patch(
+                "app.api.routes.workflow.wf_svc.get_active_run",
+                new_callable=AsyncMock,
+                return_value=active_run,
+            ):
+                transport = ASGITransport(app=app)
+                async with AsyncClient(transport=transport, base_url="http://test") as client:
+                    resp = await client.post(
+                        f"/api/v1/projects/{TEST_PROJECT_ID}/workflow/override",
+                        json={
+                            "artifact_kind": "log",
+                            "label": "Test override",
+                            "content": "content",
+                            "mime_type": "text/plain",
+                        },
+                        headers={"Authorization": "Bearer test-token"},
+                    )
 
     assert resp.status_code == 200
     mock_ov.assert_called_once()
