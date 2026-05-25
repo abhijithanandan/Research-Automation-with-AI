@@ -170,3 +170,67 @@ async def test_critic_survives_vector_store_unavailable() -> None:
     out = await critic.run(CriticInput(approved_papers=papers))
     matrix_data = json.loads(out.matrix.content)
     assert len(matrix_data["rows"]) == 1
+
+
+@pytest.mark.asyncio
+async def test_critic_accumulates_token_usage() -> None:
+    """The Critic must sum token usage across every LLM call (BRD FR-3.3).
+
+    With 3 papers the Critic makes 3 extraction calls + 1 synthesis call; the
+    _FakeLLM reports tokens_in=1, tokens_out=1 per call, so the run total is 4.
+    """
+    papers = [
+        _paper("alpha2024", "Alpha Paper"),
+        _paper("beta2024", "Beta Paper"),
+        _paper("gamma2023", "Gamma Paper"),
+    ]
+    critic = Critic(llm=_FakeLLM(), vector_store=_FakeVectorStore())
+
+    out = await critic.run(CriticInput(approved_papers=papers))
+
+    # 3 extractions + 1 synthesis = 4 LLM calls.
+    assert out.usage.llm_calls == 4
+    assert out.usage.tokens_in == 4
+    assert out.usage.tokens_out == 4
+
+
+@pytest.mark.asyncio
+async def test_critic_counts_calls_even_when_extraction_fails() -> None:
+    """A failed extraction still counts toward llm_calls is not required, but the
+    successful calls must still be summed — a failure must not lose other usage."""
+    papers = [
+        _paper("good2024", "Good Paper"),
+        _paper("bad2024", "Bad Paper"),
+    ]
+    critic = Critic(llm=_FakeLLM(fail_for={"bad2024"}), vector_store=_FakeVectorStore())
+
+    out = await critic.run(CriticInput(approved_papers=papers))
+
+    # good2024 extraction + synthesis succeed → 2 counted calls; bad2024 raised
+    # before telemetry was recorded, so it is simply absent from the total.
+    assert out.usage.llm_calls == 2
+    assert out.usage.tokens_in == 2
+
+
+@pytest.mark.asyncio
+async def test_critic_matrix_validates_against_schema() -> None:
+    """The matrix artifact JSON must validate against docs/agents/critic.schema.json
+    (docs/agents/critic.md invariant)."""
+    from pathlib import Path
+
+    import jsonschema
+
+    schema_path = Path(__file__).resolve().parents[2] / "docs" / "agents" / "critic.schema.json"
+    schema = json.loads(schema_path.read_text(encoding="utf-8"))
+
+    papers = [
+        _paper("alpha2024", "Alpha Paper"),
+        _paper("bad2024", "Bad Paper"),
+    ]
+    # Mix a successful and a failed extraction so both row shapes are exercised.
+    critic = Critic(llm=_FakeLLM(fail_for={"bad2024"}), vector_store=_FakeVectorStore())
+    out = await critic.run(CriticInput(approved_papers=papers))
+
+    matrix_data = json.loads(out.matrix.content)
+    # Raises jsonschema.ValidationError if the matrix shape drifts from the schema.
+    jsonschema.validate(instance=matrix_data, schema=schema)

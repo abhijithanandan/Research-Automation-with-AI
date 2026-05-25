@@ -1,0 +1,67 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://researchflow.ai/schemas/critic-matrix.json",
+  "title": "Critic Comparison Matrix",
+  "description": "JSON shape of the `matrix` artifact produced by the Critic agent (SPEC §6.2, docs/agents/critic.md). Mirrors MatrixModel / PaperExtraction in backend/app/agents/critic.py. Every approved paper appears as exactly one row; no paper is silently dropped.",
+  "type": "object",
+  "required": ["rows"],
+  "additionalProperties": false,
+  "properties": {
+    "rows": {
+      "type": "array",
+      "description": "One extraction row per paper in the approved pool.",
+      "items": { "$ref": "#/$defs/paperExtraction" }
+    }
+  },
+  "$defs": {
+    "paperExtraction": {
+      "type": "object",
+      "description": "Per-paper extracted attributes — one row of the comparison matrix.",
+      "required": [
+        "citation_key",
+        "problem",
+        "method",
+        "dataset",
+        "key_findings",
+        "limitations",
+        "extraction_failed"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "citation_key": {
+          "type": "string",
+          "description": "BibTeX citation key — unique within the project. Always present.",
+          "minLength": 1
+        },
+        "problem": {
+          "type": "string",
+          "description": "The research problem the paper addresses. Empty string if the extraction failed."
+        },
+        "method": {
+          "type": "string",
+          "description": "The method or approach the paper uses."
+        },
+        "dataset": {
+          "type": "string",
+          "description": "The dataset(s) the paper evaluates on."
+        },
+        "key_findings": {
+          "type": "string",
+          "description": "The paper's key results or findings."
+        },
+        "limitations": {
+          "type": "string",
+          "description": "The limitations the paper acknowledges or that the Critic identifies."
+        },
+        "extraction_failed": {
+          "type": "boolean",
+          "description": "True if the per-paper LLM extraction failed. The row is still present (invariant: no paper is dropped); the five attribute fields are empty and `error` carries the cause."
+        },
+        "error": {
+          "type": ["string", "null"],
+          "description": "The failure reason when `extraction_failed` is true; null otherwise."
+        }
+      }
+    }
+  }
+}

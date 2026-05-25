@@ -68,12 +68,98 @@ def test_librarian_keeps_distinct_titles() -> None:
     assert len(result) == 2
 
 
-def test_librarian_dedup_prefers_first_occurrence() -> None:
-    """When a DOI collision is found, the first paper is kept."""
+def test_librarian_dedup_prefers_richer_source_on_collision() -> None:
+    """When a DOI collision is found, prefer the source that gives us the most
+    downstream value. arXiv always returns a fetchable PDF URL whereas
+    Semantic Scholar often doesn't, so an arXiv entry beats a SS entry for the
+    same DOI — even if SS arrived first. This is what fixes the UI's
+    "everything badged Semantic Scholar" symptom: SS used to win every dedup
+    race by virtue of being fastest; now richer sources win regardless of
+    arrival order.
+    """
     doi = "10.1234/preferred"
-    first = _make_paper(doi, "First Paper", source="semantic_scholar")
-    second = _make_paper(doi, "Second Paper (dup)", source="arxiv")
+    first_ss = _make_paper(doi, "From SS", source="semantic_scholar")
+    second_arxiv = _make_paper(doi, "From arXiv", source="arxiv")
 
-    result = _deduplicate([first, second])
+    result = _deduplicate([first_ss, second_arxiv])
 
-    assert result[0].title == "First Paper"
+    assert len(result) == 1
+    assert result[0].source == "arxiv"
+
+
+def test_librarian_dedup_pdf_url_dominates_source_ranking() -> None:
+    """A paper with a usable pdf_url beats one without — even if the without-
+    pdf paper would otherwise be ranked higher by source. Crossref normally
+    ranks lowest, but a Crossref entry that an Unpaywall enrichment populated
+    a pdf_url for should beat an arXiv entry with pdf_url=None."""
+    doi = "10.1234/oa-crossref"
+    crossref_with_pdf = _make_paper(doi, "Same Paper", source="crossref")
+    crossref_with_pdf = crossref_with_pdf.model_copy(
+        update={"pdf_url": "https://oa.example.com/p.pdf"}
+    )
+    arxiv_no_pdf = _make_paper(doi, "Same Paper", source="arxiv")
+    # Force pdf_url=None on the arxiv one to simulate the rare case.
+    arxiv_no_pdf = arxiv_no_pdf.model_copy(update={"pdf_url": None})
+
+    result = _deduplicate([arxiv_no_pdf, crossref_with_pdf])
+
+    assert len(result) == 1
+    assert result[0].source == "crossref"
+    assert result[0].pdf_url is not None
+
+
+def test_librarian_merges_results_from_all_five_sources() -> None:
+    """All five APIs can return the same paper. Dedup must collapse them to one.
+
+    This is the 5-source-engine invariant: when SS + arXiv + Crossref + CORE +
+    Europe PMC all surface the same DOI, the final pool has a single entry.
+    Distinct papers from each source coexist alongside it.
+    """
+    shared_doi = "10.5555/shared.2024.001"
+    # Same paper appearing in all five sources.
+    duplicates = [
+        _make_paper(shared_doi, "A Shared Paper", source="semantic_scholar"),
+        _make_paper(shared_doi, "A Shared Paper", source="arxiv"),
+        _make_paper(shared_doi, "A Shared Paper", source="crossref"),
+        _make_paper(shared_doi, "A Shared Paper", source="core"),
+        _make_paper(shared_doi, "A Shared Paper", source="europe_pmc"),
+    ]
+    # Distinct papers that should survive. Titles intentionally share no
+    # tokens so the fuzzy matcher does not collapse them.
+    unique = [
+        _make_paper(
+            "10.5555/uniq.ss",
+            "Transformers for Sentiment Classification",
+            source="semantic_scholar",
+        ),
+        _make_paper(
+            "arxiv:2401.99999",
+            "Graph Neural Networks in Drug Discovery",
+            source="arxiv",
+        ),
+        _make_paper(
+            "10.5555/uniq.crf",
+            "Bayesian Optimisation for Hyperparameter Tuning",
+            source="crossref",
+        ),
+        _make_paper(
+            "10.5555/uniq.core",
+            "Reinforcement Learning Robotic Manipulation",
+            source="core",
+        ),
+        _make_paper(
+            "PMC1234567",
+            "CRISPR-Cas9 Genome Editing in Mice",
+            source="europe_pmc",
+        ),
+    ]
+
+    result = _deduplicate(duplicates + unique)
+
+    # 1 collapsed duplicate + 5 unique = 6 papers total.
+    assert len(result) == 6
+    doi_count = sum(1 for p in result if p.external_id == shared_doi)
+    assert doi_count == 1, "the shared DOI must appear exactly once"
+    # All five sources must be represented somewhere in the merged pool.
+    sources = {p.source for p in result}
+    assert sources >= {"semantic_scholar", "arxiv", "crossref", "core", "europe_pmc"}

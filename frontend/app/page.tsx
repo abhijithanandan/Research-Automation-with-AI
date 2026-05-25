@@ -3,16 +3,29 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import { ApprovalPanel, type OverridePayload } from "@/components/workflow/ApprovalPanel";
+import { Markdown } from "@/components/workflow/Markdown";
 import { PhaseTracker } from "@/components/workflow/PhaseTracker";
+import {
+  SynthesisReview,
+  type SynthesisOverridePayload,
+} from "@/components/workflow/SynthesisReview";
 import { api } from "@/lib/api";
-import { connectProjectEvents, type ServerEvent } from "@/lib/ws";
-import type { Paper, Phase, WorkflowState } from "@/lib/types";
+import { connectProjectEvents, type ManagedSocket, type ServerEvent } from "@/lib/ws";
+import type { Artifact, Paper, Phase, WorkflowState } from "@/lib/types";
 
 // ---------------------------------------------------------------------------
 // UI state machine
 // ---------------------------------------------------------------------------
 
-type View = "idle" | "creating" | "running" | "awaiting" | "busy" | "done" | "error";
+type View =
+  | "idle"
+  | "creating"
+  | "running"
+  | "awaiting"
+  | "synthesis"
+  | "busy"
+  | "done"
+  | "error";
 
 interface RunCtx {
   projectId: string;
@@ -25,11 +38,48 @@ interface RunCtx {
 // Helpers
 // ---------------------------------------------------------------------------
 
+// A DOI looks like "10.<registrant>/<suffix>" — detect so we route DOI-keyed
+// papers to doi.org (which redirects to whichever publisher owns the record)
+// instead of guessing at a source-specific URL pattern that won't resolve.
+function looksLikeDOI(external_id: string): boolean {
+  return /^10\.\d{4,9}\//.test(external_id);
+}
+
+// Some Semantic Scholar entries carry a stale IEEE Xplore PDF URL pointing at
+// the deprecated /ielx7/<group>/<issue>/<artnum>.pdf CDN endpoint. IEEE
+// retired that CDN — every such URL now 404s. The article number is still
+// embedded in the URL, so we rewrite to the working /document/<artnum> page.
+const _IELX_RE = /ieeexplore\.ieee\.org\/ielx\d*\/[^/]+\/[^/]+\/0*(\d+)\.pdf/i;
+
+function rewriteIeeeIfBroken(url: string): string | null {
+  const m = _IELX_RE.exec(url);
+  if (!m) return null;
+  const artnum = m[1];
+  return `https://ieeexplore.ieee.org/document/${artnum}`;
+}
+
 function paperSourceUrl(paper: Paper): string {
-  if (paper.pdf_url) return paper.pdf_url;
-  if (paper.source === "arxiv") return `https://arxiv.org/abs/${paper.external_id}`;
-  if (paper.source === "semantic_scholar") return `https://www.semanticscholar.org/paper/${paper.external_id}`;
-  if (paper.source === "crossref") return `https://doi.org/${paper.external_id}`;
+  // The pdf_url field is the strongest hint we have — but only when it
+  // actually resolves. The IEEE /ielx7/ URLs that Semantic Scholar returns
+  // for IEEE papers are universally 404s today; rewrite them to the working
+  // /document/<artnum> page instead.
+  if (paper.pdf_url) {
+    const rewritten = rewriteIeeeIfBroken(paper.pdf_url);
+    if (rewritten) return rewritten;
+    return paper.pdf_url;
+  }
+  const id = paper.external_id ?? "";
+  // DOI is universal — prefer it over source-specific URL guesses. Semantic
+  // Scholar and Crossref typically return a DOI as the external id; CORE may
+  // too. Europe PMC returns DOI when known, else a PMC id.
+  if (looksLikeDOI(id)) return `https://doi.org/${id}`;
+  if (paper.source === "arxiv") return `https://arxiv.org/abs/${id}`;
+  if (paper.source === "semantic_scholar")
+    return `https://www.semanticscholar.org/paper/${id}`;
+  if (paper.source === "europe_pmc" && id.startsWith("PMC"))
+    return `https://europepmc.org/article/PMC/${id.slice(3)}`;
+  if (paper.source === "core")
+    return `https://core.ac.uk/search?q=${encodeURIComponent(paper.title)}`;
   return "#";
 }
 
@@ -38,6 +88,8 @@ function sourceLabel(source: string) {
     arxiv: "arXiv",
     semantic_scholar: "Semantic Scholar",
     crossref: "Crossref",
+    core: "CORE",
+    europe_pmc: "Europe PMC",
     upload: "Upload",
   };
   return map[source] ?? source;
@@ -46,7 +98,27 @@ function sourceLabel(source: string) {
 function sourceBadgeClass(source: string) {
   if (source === "arxiv") return "bg-orange-500/10 text-orange-400 border-orange-500/20";
   if (source === "semantic_scholar") return "bg-blue-500/10 text-blue-400 border-blue-500/20";
+  if (source === "core") return "bg-emerald-500/10 text-emerald-400 border-emerald-500/20";
+  if (source === "europe_pmc") return "bg-pink-500/10 text-pink-400 border-pink-500/20";
   return "bg-slate-700/50 text-slate-400 border-slate-600/50";
+}
+
+function latestArtifact(artifacts: Artifact[]): Artifact | null {
+  const sorted = [...artifacts].sort(
+    (a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime(),
+  );
+  return sorted[0] ?? null;
+}
+
+function phaseLabel(phase: Phase): string {
+  const map: Record<Phase, string> = {
+    discovery: "Phase 1 · Discovery",
+    synthesis: "Phase 2 · Synthesis",
+    analysis: "Phase 3 · Analysis",
+    drafting: "Phase 4 · Drafting",
+    done: "Complete",
+  };
+  return map[phase] ?? phase;
 }
 
 // ---------------------------------------------------------------------------
@@ -66,7 +138,14 @@ export default function HomePage() {
   const [papers, setPapers] = useState<Paper[]>([]);
   const [papersLoading, setPapersLoading] = useState(false);
   const [approvalSummary, setApprovalSummary] = useState("");
-  const wsRef = useRef<WebSocket | null>(null);
+  const [matrix, setMatrix] = useState<Artifact | null>(null);
+  const [summary, setSummary] = useState<Artifact | null>(null);
+  const [synthesisLoading, setSynthesisLoading] = useState(false);
+  // Which phase the DONE screen should report as complete. Set when the
+  // workflow finishes a phase — not inferred from ctx.phase, which is unreliable
+  // (the backend reports phase="synthesis" even after synthesis is approved).
+  const [completedPhase, setCompletedPhase] = useState<"discovery" | "synthesis" | null>(null);
+  const wsRef = useRef<ManagedSocket | null>(null);
 
   useEffect(() => {
     logEndRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -95,23 +174,70 @@ export default function HomePage() {
         setLogLines((l) => [...l, `✗  ${evt.agent} error: ${evt.error}`]);
         break;
       case "approval.required":
-        setApprovalSummary(evt.summary ?? "Review the candidates below.");
+        setApprovalSummary(evt.summary ?? "Review the output below.");
         setCtx((c) => c ? { ...c, phase: evt.phase, state: "awaiting_approval" } : c);
-        setPapersLoading(true);
-        api.papers
-          .list(projectId, DEV_TOKEN)
-          .then((p) => setPapers(p))
-          .catch(() => setError("Failed to load candidate papers."))
-          .finally(() => { setPapersLoading(false); setView("awaiting"); });
+        if (evt.phase === "synthesis") {
+          // Phase 2 — load the Critic's matrix + summary artifacts, plus the
+          // paper pool so the matrix can show titles (not just citation keys).
+          setSynthesisLoading(true);
+          setView("synthesis");
+          Promise.all([
+            api.artifacts.list(projectId, "matrix", DEV_TOKEN),
+            api.artifacts.list(projectId, "summary", DEV_TOKEN),
+            api.papers.list(projectId, DEV_TOKEN),
+          ])
+            .then(([matrices, summaries, paperList]) => {
+              setMatrix(latestArtifact(matrices));
+              setSummary(latestArtifact(summaries));
+              if (paperList.length > 0) setPapers(paperList);
+            })
+            .catch(() => setError("Failed to load synthesis artifacts."))
+            .finally(() => setSynthesisLoading(false));
+        } else if (evt.phase === "discovery") {
+          // Phase 1 — load the candidate paper pool. Guard against a replayed
+          // stale discovery event dragging the user back from a later phase.
+          setPapersLoading(true);
+          api.papers
+            .list(projectId, DEV_TOKEN)
+            .then((p) => setPapers(p))
+            .catch(() => setError("Failed to load candidate papers."))
+            .finally(() => {
+              setPapersLoading(false);
+              setView((v) =>
+                v === "synthesis" || v === "done" ? v : "awaiting",
+              );
+            });
+        }
         break;
       case "state.changed":
         setCtx((c) => c ? { ...c, phase: evt.phase, state: evt.state, runId: evt.run_id } : c);
-        if (evt.state === "approved" || evt.phase === "done") {
+        // Guarded functional updates: a replayed/late state.changed must never
+        // knock the user out of an active approval screen back into "busy".
+        if (evt.phase === "done" || evt.phase === "drafting") {
+          // Phase 2 approved — drafting begins (Scribe is a Phase 4 stub).
+          setCompletedPhase("synthesis");
           setView("done");
+        } else if (evt.state === "approved" && evt.phase === "synthesis") {
+          // Synthesis approved & graph ran to completion (draft stubs → assemble).
+          setCompletedPhase("synthesis");
+          setView("done");
+        } else if (evt.state === "approved" && evt.phase === "discovery") {
+          // Phase 1 approved — synthesis is about to run; show "busy" ONLY while
+          // still on a Phase-1 screen. If we are already showing the synthesis
+          // review (the approval.required arrived first, or this is a replay),
+          // do not regress.
+          setView((v) =>
+            v === "awaiting" || v === "running" ? "busy" : v,
+          );
+          setLogLines((l) =>
+            l.includes("✓  Pool approved — Critic synthesizing…")
+              ? l
+              : [...l, "✓  Pool approved — Critic synthesizing…"],
+          );
         } else if (evt.state === "awaiting_approval") {
           // handled by approval.required
         } else if (evt.state === "running" && evt.phase === "discovery") {
-          setView("running");
+          setView((v) => (v === "idle" || v === "creating" ? "running" : v));
         } else if (evt.state === "error") {
           setError("Workflow encountered an error.");
           setView("error");
@@ -127,6 +253,9 @@ export default function HomePage() {
     setError(null);
     setLogLines([]);
     setPapers([]);
+    setMatrix(null);
+    setSummary(null);
+    setCompletedPhase(null);
     try {
       const project = await api.projects.create(
         { title: title.trim(), seed_query: seedQuery.trim() },
@@ -175,13 +304,25 @@ export default function HomePage() {
     }
   }
 
-  async function handleOverride(payload: OverridePayload) {
+  async function handleOverride(payload: OverridePayload | SynthesisOverridePayload) {
     if (!ctx) return;
     setView("busy");
     try {
       await api.workflow.override(ctx.projectId, payload, DEV_TOKEN);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Override failed.");
+      setView("error");
+    }
+  }
+
+  async function handleSynthesisReject(feedback: string) {
+    if (!ctx) return;
+    setView("busy");
+    try {
+      await api.workflow.reject(ctx.projectId, feedback, DEV_TOKEN);
+      setLogLines((l) => [...l, "↩  Rejected — Critic regenerating synthesis…"]);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Reject failed.");
       setView("error");
     }
   }
@@ -212,7 +353,7 @@ export default function HomePage() {
           </div>
           <span className="text-sm font-semibold tracking-tight text-slate-100">ResearchFlow AI</span>
           <span className="rounded-full bg-blue-500/10 border border-blue-500/20 px-2 py-0.5 text-[10px] font-medium text-blue-400 uppercase tracking-wider">
-            Phase 1
+            {ctx ? phaseLabel(ctx.phase) : "Phase 1 + 2"}
           </span>
         </div>
         {ctx && (
@@ -310,8 +451,25 @@ export default function HomePage() {
             </div>
           )}
 
-          {/* ── AWAITING ────────────────────────────────────────────────── */}
-          {(view === "awaiting" || (view === "busy" && papers.length > 0)) && (
+          {/* ── SYNTHESIS (Phase 2) ─────────────────────────────────────── */}
+          {view === "synthesis" && (
+            <div className="space-y-4 animate-fade-in">
+              <AgentLog lines={logLines} endRef={logEndRef} />
+              <SynthesisReview
+                matrix={matrix}
+                summary={summary}
+                papers={papers}
+                loading={synthesisLoading}
+                busy={false}
+                onApprove={handleApprove}
+                onReject={handleSynthesisReject}
+                onOverride={handleOverride}
+              />
+            </div>
+          )}
+
+          {/* ── AWAITING (Phase 1) ──────────────────────────────────────── */}
+          {view === "awaiting" && (
             <div className="space-y-4 animate-fade-in">
               <AgentLog lines={logLines} endRef={logEndRef} />
 
@@ -423,7 +581,9 @@ export default function HomePage() {
           )}
 
           {/* ── DONE ────────────────────────────────────────────────────── */}
-          {view === "done" && (
+          {view === "done" && (() => {
+            const synthesisDone = completedPhase === "synthesis";
+            return (
             <div className="animate-fade-in space-y-4">
               <div className="rounded-xl border border-emerald-500/20 bg-emerald-500/5 glow-green overflow-hidden">
                 <div className="flex items-center gap-3 border-b border-emerald-500/20 px-5 py-4">
@@ -432,16 +592,27 @@ export default function HomePage() {
                       <path d="M3 8l4 4 6-7" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
                     </svg>
                   </div>
-                  <p className="text-sm font-semibold text-emerald-300">Phase 1 complete</p>
+                  <p className="text-sm font-semibold text-emerald-300">
+                    {synthesisDone ? "Phase 2 complete — synthesis approved" : "Phase 1 complete"}
+                  </p>
                 </div>
                 <div className="px-5 py-4 space-y-4">
                   <p className="text-sm text-slate-400">
-                    <span className="font-semibold text-emerald-400">{approvedCount} paper{approvedCount !== 1 ? "s" : ""}</span>{" "}
-                    approved and locked into your working pool. Phase 2 (Synthesis) will begin when ready.
+                    {synthesisDone ? (
+                      <>
+                        The literature synthesis is approved and locked. Phase 4 (Drafting)
+                        will begin when the Scribe agent is enabled.
+                      </>
+                    ) : (
+                      <>
+                        <span className="font-semibold text-emerald-400">{approvedCount} paper{approvedCount !== 1 ? "s" : ""}</span>{" "}
+                        approved and locked into your working pool. Phase 2 (Synthesis) will begin when ready.
+                      </>
+                    )}
                   </p>
 
-                  {/* Approved papers summary */}
-                  {papers.filter((p) => p.approved).length > 0 && (
+                  {/* Phase 1: approved papers summary */}
+                  {!synthesisDone && papers.filter((p) => p.approved).length > 0 && (
                     <ul className="space-y-1.5">
                       {papers.filter((p) => p.approved).map((p) => (
                         <li key={p.id} className="flex items-start gap-2 text-xs text-slate-400">
@@ -459,6 +630,13 @@ export default function HomePage() {
                     </ul>
                   )}
 
+                  {/* Phase 2: final synthesis read-only view */}
+                  {synthesisDone && summary && (
+                    <div className="rounded-lg border border-[#1e2d45] bg-[#0a0f1e] p-4">
+                      <Markdown content={summary.content} />
+                    </div>
+                  )}
+
                   <AgentLog lines={logLines} endRef={logEndRef} />
 
                   <button
@@ -466,6 +644,7 @@ export default function HomePage() {
                     onClick={() => {
                       setView("idle"); setCtx(null); setLogLines([]);
                       setPapers([]); setTitle(""); setSeedQuery("");
+                      setMatrix(null); setSummary(null); setCompletedPhase(null);
                       wsRef.current?.close();
                     }}
                     className="rounded-lg border border-emerald-500/30 bg-emerald-500/10 px-4 py-2 text-sm font-medium text-emerald-400 transition-all hover:bg-emerald-500/20"
@@ -475,7 +654,8 @@ export default function HomePage() {
                 </div>
               </div>
             </div>
-          )}
+            );
+          })()}
 
           {/* ── ERROR ───────────────────────────────────────────────────── */}
           {view === "error" && (
@@ -495,7 +675,9 @@ export default function HomePage() {
                   type="button"
                   onClick={() => {
                     setView("idle"); setError(null); setCtx(null);
-                    setLogLines([]); setPapers([]); wsRef.current?.close();
+                    setLogLines([]); setPapers([]);
+                    setMatrix(null); setSummary(null); setCompletedPhase(null);
+                    wsRef.current?.close();
                   }}
                   className="rounded-lg border border-red-500/30 bg-red-500/10 px-4 py-2 text-sm font-medium text-red-400 transition-all hover:bg-red-500/20"
                 >
@@ -509,7 +691,7 @@ export default function HomePage() {
 
       {/* ── Footer ──────────────────────────────────────────────────────── */}
       <footer className="border-t border-[#1e2d45] px-6 py-3 text-center text-xs text-slate-700">
-        ResearchFlow AI · Phase 1 MVP · Human-in-the-loop research automation
+        ResearchFlow AI · Discovery + Synthesis · Human-in-the-loop research automation
       </footer>
     </div>
   );

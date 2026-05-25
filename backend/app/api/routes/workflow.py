@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Literal
 from uuid import UUID
 
 from fastapi import APIRouter, HTTPException, status
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from app.api.deps import CurrentUser, DbSession
 from app.models.db import ProjectRow
@@ -16,15 +16,33 @@ from app.services import workflow as wf_svc
 router = APIRouter(tags=["workflow"], prefix="/projects/{project_id}/workflow")
 
 
+# Per the security audit (see docs/audit/phase-2-audit.md):
+# - feedback flows into LLM prompts; cap length to prevent prompt-injection
+#   amplification and to keep us under the model's context window.
+# - override content lands in the artifacts table and into LangGraph state;
+#   cap to a sane reviewable size (~256 KB of markdown is plenty).
+# - artifact_kind and mime_type are constrained to the SPEC §2.2 literals so
+#   a crafted client cannot write garbage strings into the DB.
+
+_MAX_FEEDBACK_CHARS = 2_000
+_MAX_OVERRIDE_CONTENT_CHARS = 256_000
+_MAX_LABEL_CHARS = 200
+_MAX_MIME_CHARS = 100
+
+# Artifact.kind literal from SPEC §2.2 — replicated here so the route can
+# reject unknown values at the API boundary before they reach the DB.
+ArtifactKindIn = Literal["matrix", "summary", "section", "figure", "code", "log"]
+
+
 class FeedbackPayload(BaseModel):
-    feedback: str | None = None
+    feedback: str | None = Field(default=None, max_length=_MAX_FEEDBACK_CHARS)
 
 
 class OverridePayload(BaseModel):
-    artifact_kind: str
-    label: str
-    content: str
-    mime_type: str = "text/markdown"
+    artifact_kind: ArtifactKindIn
+    label: str = Field(..., min_length=1, max_length=_MAX_LABEL_CHARS)
+    content: str = Field(..., min_length=1, max_length=_MAX_OVERRIDE_CONTENT_CHARS)
+    mime_type: str = Field(default="text/markdown", max_length=_MAX_MIME_CHARS)
 
 
 @router.post("/start", response_model=WorkflowRun)

@@ -113,6 +113,75 @@ async def test_graph_interrupts_at_synthesis_gate_after_pool_approval() -> None:
 
 
 @pytest.mark.asyncio
+async def test_synthesis_override_replaces_summary_as_canonical_output() -> None:
+    """An override at the synthesis gate must replace the Critic's summary with
+    the human-edited artifact (SPEC §5.2/§5.3 — manual_override semantics)."""
+    from langgraph.types import Command
+
+    graph = build_graph(MemorySaver())
+    run_id = uuid4()
+    config = {"configurable": {"thread_id": str(run_id)}}
+
+    from app.agents.librarian import LibrarianOutput
+
+    librarian_out = LibrarianOutput(candidates=[], expanded_queries=[], arxiv_categories=[])
+
+    human_summary = {
+        "id": str(uuid4()),
+        "project_id": str(TEST_PROJECT_ID),
+        "kind": "summary",
+        "label": "literature-summary",
+        "content": "## Human-edited synthesis\n\nThis replaces the Critic output.",
+        "mime_type": "text/markdown",
+        "produced_by": "human",
+        "parent_id": None,
+        "created_at": "2026-05-23T00:00:00+00:00",
+    }
+
+    with patch("app.graph.workflow.Librarian") as mock_lib:
+        mock_lib.return_value.run = AsyncMock(return_value=librarian_out)
+        with patch("app.graph.workflow.Critic") as mock_critic:
+            mock_critic.return_value.run = AsyncMock(return_value=_critic_output())
+
+            initial_state = {
+                "project_id": TEST_PROJECT_ID,
+                "workflow_run_id": run_id,
+                "seed_query": "test",
+                "phase": Phase.DISCOVERY,
+                "candidates": [],
+                "approved_pool": [],
+                "awaiting_approval": False,
+                "last_feedback": None,
+                "last_override": None,
+                "expanded_queries": [],
+                "sections_done": [],
+                "sections_remaining": ["abstract"],
+                "drafts": [],
+                "matrix": None,
+                "summary": None,
+                "synthesis_approval": None,
+            }
+            await graph.ainvoke(initial_state, config)
+            # Approve the pool → graph runs synthesize, parks at synthesis gate.
+            await graph.ainvoke(Command(resume="approve"), config)
+            # Override the synthesis: resume="approve" + last_override (how
+            # override_workflow drives it).
+            await graph.ainvoke(
+                Command(resume="approve", update={"last_override": human_summary}),
+                config,
+            )
+            snapshot = await graph.aget_state(config)
+
+    # The summary in state must now be the human-edited artifact, not the Critic's.
+    final_summary = snapshot.values.get("summary")
+    assert final_summary is not None
+    assert final_summary["produced_by"] == "human"
+    assert "Human-edited synthesis" in final_summary["content"]
+    # The override must be cleared so a later gate cannot re-consume it.
+    assert snapshot.values.get("last_override") is None
+
+
+@pytest.mark.asyncio
 async def test_resume_graph_emits_synthesis_approval_required() -> None:
     """_resume_graph must emit approval.required (phase=synthesis) when the graph
     is still interrupted after an approve resume, not state.changed=approved."""

@@ -8,26 +8,115 @@ const BASE_URL =
 
 type FetchOptions = RequestInit & { token?: string };
 
+/** Bucketing the UI cares about. Used to choose a recovery action (sign in,
+ * back off, validate input, retry) without parsing free-form error strings.
+ * Lined up with FastAPI's status-code conventions and the SPEC §3.7 codes. */
+export type ApiErrorKind =
+  | "auth"        // 401/403 — sign-in or permission problem
+  | "not_found"   // 404
+  | "conflict"    // 409 — workflow phase locked
+  | "validation"  // 422 — Pydantic validation failure
+  | "rate_limit"  // 429
+  | "server"      // 5xx
+  | "network"     // fetch threw before getting a response
+  | "unknown";
+
+/** Typed API error — replaces the previous `throw new Error(JSON.stringify(...))`
+ * pattern. UI code can `instanceof ApiError` and react to .kind / .status. */
+export class ApiError extends Error {
+  readonly kind: ApiErrorKind;
+  readonly status: number;
+  readonly code: string;
+  readonly traceId?: string;
+  readonly detail: unknown;
+
+  constructor(
+    kind: ApiErrorKind,
+    status: number,
+    code: string,
+    message: string,
+    detail: unknown,
+    traceId?: string,
+  ) {
+    super(message);
+    this.name = "ApiError";
+    this.kind = kind;
+    this.status = status;
+    this.code = code;
+    this.detail = detail;
+    this.traceId = traceId;
+  }
+}
+
+function classifyStatus(status: number): ApiErrorKind {
+  if (status === 401 || status === 403) return "auth";
+  if (status === 404) return "not_found";
+  if (status === 409) return "conflict";
+  if (status === 422) return "validation";
+  if (status === 429) return "rate_limit";
+  if (status >= 500) return "server";
+  return "unknown";
+}
+
+interface ErrorBody {
+  error?: { code?: string; message?: string; trace_id?: string };
+  detail?: unknown;
+  message?: string;
+}
+
+function extractError(status: number, body: unknown): ApiError {
+  const e = (body ?? {}) as ErrorBody;
+  // FastAPI/HTTPException uses `detail`; our app uses SPEC §3.7 `error: {code,
+  // message, trace_id}`. Handle both shapes.
+  const detailObj =
+    typeof e.detail === "object" && e.detail !== null
+      ? (e.detail as { code?: string; message?: string })
+      : undefined;
+  const code = e.error?.code ?? detailObj?.code ?? "unknown";
+  const message =
+    e.error?.message ?? detailObj?.message ?? e.message ?? `HTTP ${status}`;
+  return new ApiError(
+    classifyStatus(status),
+    status,
+    code,
+    message,
+    body,
+    e.error?.trace_id,
+  );
+}
+
 async function request<T>(path: string, opts: FetchOptions = {}): Promise<T> {
   const { token, headers, ...rest } = opts;
-  const res = await fetch(`${BASE_URL}/api/v1${path}`, {
-    ...rest,
-    headers: {
-      "Content-Type": "application/json",
-      ...(token ? { Authorization: `Bearer ${token}` } : {}),
-      ...headers,
-    },
-  });
-  if (!res.ok) {
-    let detail: unknown;
-    try {
-      detail = await res.json();
-    } catch {
-      detail = { error: { code: "unknown", message: res.statusText } };
-    }
-    throw new Error(
-      `API ${res.status}: ${JSON.stringify(detail)}`,
+  let res: Response;
+  try {
+    res = await fetch(`${BASE_URL}/api/v1${path}`, {
+      ...rest,
+      headers: {
+        "Content-Type": "application/json",
+        ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        ...headers,
+      },
+    });
+  } catch (exc) {
+    // fetch() throws on network failure (offline, DNS error, CORS preflight
+    // rejection). Surface that as a typed network error so the UI can
+    // distinguish it from server errors.
+    throw new ApiError(
+      "network",
+      0,
+      "network_error",
+      exc instanceof Error ? exc.message : "Network request failed",
+      null,
     );
+  }
+  if (!res.ok) {
+    let body: unknown;
+    try {
+      body = await res.json();
+    } catch {
+      body = { error: { code: "unknown", message: res.statusText } };
+    }
+    throw extractError(res.status, body);
   }
   if (res.status === 204) return undefined as T;
   return (await res.json()) as T;

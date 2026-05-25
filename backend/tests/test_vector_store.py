@@ -26,6 +26,7 @@ def _mock_chroma_client() -> MagicMock:
     client = MagicMock()
     collection = MagicMock()
     client.get_or_create_collection.return_value = collection
+    collection.count.return_value = 2
     collection.query.return_value = {
         "ids": [["doc-1", "doc-2"]],
         "documents": [["first abstract", "second abstract"]],

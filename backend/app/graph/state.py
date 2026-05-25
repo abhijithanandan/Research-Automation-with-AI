@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Any, TypedDict
 from uuid import UUID
 
-from app.models.schemas import Artifact, Phase
+from app.models.schemas import Phase
 
 
 class GraphState(TypedDict, total=False):
@@ -32,17 +32,20 @@ class GraphState(TypedDict, total=False):
     candidates: list[dict[str, Any]]
     approved_pool: list[dict[str, Any]]
 
-    # Phase 2
-    matrix: Artifact | None
-    summary: Artifact | None
+    # Phase 2 — stored as dicts for checkpoint serialisation (like candidates).
+    matrix: dict[str, Any] | None
+    summary: dict[str, Any] | None
+    synthesis_approval: str | None
+    # Token/cost rollup for the Critic run — written to audit_log (BRD FR-3.3).
+    synthesis_usage: dict[str, Any] | None
 
     # Phase 4
     sections_done: list[str]
     sections_remaining: list[str]
-    drafts: list[Artifact]
+    drafts: list[dict[str, Any]]
 
     # Control
     awaiting_approval: bool
     last_feedback: str | None
-    last_override: Artifact | None
+    last_override: dict[str, Any] | None  # stored as dict for checkpoint serialisation
     pool_approval: str | None

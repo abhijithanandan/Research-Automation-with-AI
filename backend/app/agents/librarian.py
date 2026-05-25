@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import math
+import re
 from typing import Literal
 from uuid import UUID
 
@@ -23,7 +24,8 @@ from thefuzz import fuzz
 
 from app.agents.base import Agent
 from app.models.schemas import Paper
-from app.services.discovery import DiscoveryService, generate_citation_keys
+from app.services.discovery import generate_citation_keys
+from app.services.discovery_router import DiscoveryService
 from app.services.llm import get_llm_gateway
 from app.utils.logging import get_logger
 
@@ -157,45 +159,82 @@ def _normalise_doi(doi: str | None) -> str:
     return normalised
 
 
+# Source preference ranking when the same paper arrives from multiple APIs.
+# Higher score = more useful downstream (linkable / fetchable). arXiv always
+# returns a working PDF URL; Europe PMC and CORE often do; Semantic Scholar
+# sometimes does (when openAccessPdf is present); Crossref rarely does.
+# Tie-broken further down by whether `pdf_url` is actually populated.
+_SOURCE_RANK: dict[str, int] = {
+    "arxiv": 5,
+    "europe_pmc": 4,
+    "core": 3,
+    "semantic_scholar": 2,
+    "crossref": 1,
+    "upload": 6,  # user-uploaded PDFs always win — they already have full text.
+}
+
+# Real DOI regex — "10.<registrant 4-9 digits>/<suffix>". The slash is the key:
+# bare arXiv ids like "2310.12345" never contain one, so they correctly do NOT
+# match. Applies to every source that returns a DOI (SS, Crossref, CORE, PMC).
+_DOI_RE = re.compile(r"^10\.\d{4,9}/\S+$")
+
+
+def _is_doi(external_id: str) -> bool:
+    return bool(_DOI_RE.match(external_id))
+
+
+def _paper_score(p: Paper) -> int:
+    """Higher = preferred when merging duplicates. PDF-availability dominates,
+    then source ranking. Crossref-with-pdf still beats arXiv-without-pdf
+    because the goal is downstream full-text RAG and linkability."""
+    pdf_bonus = 10 if p.pdf_url is not None else 0
+    return pdf_bonus + _SOURCE_RANK.get(p.source, 0)
+
+
 def _deduplicate(papers: list[Paper]) -> list[Paper]:
     """Remove duplicates by DOI first, then by fuzzy title.
 
-    Keeps the first occurrence (prefer Semantic Scholar ordering which tends
-    to be more complete). This mirrors the contract in docs/agents/librarian.md.
-
-    DOI detection uses source=="semantic_scholar" as a proxy — Semantic Scholar
-    always sets external_id to the DOI when one exists (extracted from externalIds["DOI"]).
-    ArXiv papers never have a DOI in external_id (it's an arxiv ID like "2310.12345"),
-    so checking "10." in external_id was fragile (2310.12345 matches!).
+    When a duplicate is found, keep whichever paper scores higher — so a
+    Crossref entry with an Unpaywall-resolved PDF beats an SS entry without
+    one, and an arXiv entry (which always has a fetchable PDF) wins over the
+    same paper indexed elsewhere. Without this preference the merged pool was
+    dominated by whichever source's HTTP response landed first, regardless of
+    how useful its metadata was downstream.
     """
-    seen_dois: set[str] = set()
+    # DOI → index in `unique`. We mutate `unique` in place when a better
+    # candidate for an existing DOI comes along.
+    doi_to_idx: dict[str, int] = {}
     unique: list[Paper] = []
 
     for paper in papers:
-        # Only treat external_id as a DOI when the source explicitly provides one.
-        # Semantic Scholar sets external_id from externalIds["DOI"] when present.
-        # ArXiv IDs (e.g. "2310.12345") look like DOIs but are not.
-        is_doi = paper.source == "semantic_scholar" and paper.external_id.startswith("10.")
-        doi = _normalise_doi(paper.external_id if is_doi else None)
+        doi = _normalise_doi(paper.external_id) if _is_doi(paper.external_id) else None
 
         if doi:
-            if doi in seen_dois:
+            existing_idx = doi_to_idx.get(doi)
+            if existing_idx is None:
+                doi_to_idx[doi] = len(unique)
+                unique.append(paper)
                 continue
-            seen_dois.add(doi)
-            unique.append(paper)
+            # Same DOI seen before — keep the higher-scoring entry.
+            if _paper_score(paper) > _paper_score(unique[existing_idx]):
+                unique[existing_idx] = paper
             continue
 
-        # No DOI -- check fuzzy title against existing unique titles.
+        # No DOI — check fuzzy title against existing unique titles. When we
+        # find a fuzzy match, replace the existing entry if the new one is
+        # richer (mirrors the DOI-collision merge logic above).
         title_normalised = paper.title.lower().strip()
-        is_dup = False
-        for existing in unique:
+        replaced_at: int | None = None
+        for i, existing in enumerate(unique):
             ratio: int = fuzz.token_set_ratio(title_normalised, existing.title.lower().strip())
             if ratio >= _FUZZY_RATIO_THRESHOLD:
-                is_dup = True
+                replaced_at = i
                 break
 
-        if not is_dup:
+        if replaced_at is None:
             unique.append(paper)
+        elif _paper_score(paper) > _paper_score(unique[replaced_at]):
+            unique[replaced_at] = paper
 
     return unique
 

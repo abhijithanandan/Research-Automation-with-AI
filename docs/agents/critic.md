@@ -32,7 +32,7 @@ class CriticOutput:
 ## Invariants
 
 - Every paper in `approved_papers` appears in `matrix`. No paper is silently dropped.
-- The matrix JSON validates against `docs/agents/critic.schema.json` (TBD; create on implementation).
+- The matrix JSON validates against [`docs/agents/critic.schema.json`](./critic.schema.json).
 - The summary references at most the papers in `approved_papers` (no fabricated citations).
 
 ## Failure modes

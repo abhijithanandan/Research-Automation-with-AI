@@ -52,7 +52,7 @@ class WorkflowRun(BaseModel):
 class Paper(BaseModel):
     id: UUID
     project_id: UUID | None = None  # None until Librarian stamps it; required before DB persist
-    source: Literal["semantic_scholar", "arxiv", "crossref", "upload"]
+    source: Literal["semantic_scholar", "arxiv", "crossref", "core", "europe_pmc", "upload"]
     external_id: str
     title: str
     authors: list[str]

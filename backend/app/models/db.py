@@ -6,7 +6,7 @@ from datetime import datetime
 from typing import Any
 from uuid import UUID, uuid4
 
-from sqlalchemy import JSON, TIMESTAMP, ForeignKey, Numeric, String, Text
+from sqlalchemy import JSON, TIMESTAMP, ForeignKey, Numeric, String, Text, UniqueConstraint
 from sqlalchemy.dialects.postgresql import UUID as PGUUID
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
@@ -59,6 +59,16 @@ class WorkflowRunRow(Base):
 
 class PaperRow(Base):
     __tablename__ = "papers"
+    # Uniqueness on (project_id, citation_key) prevents the check-then-insert
+    # race in `_persist_candidates`: two concurrent discovery runs for the same
+    # project (e.g. retry after a transient failure) used to be able to create
+    # duplicate paper rows because the existence check and insert were not
+    # atomic. The constraint here makes the DB the source of truth; the
+    # service layer uses INSERT ... ON CONFLICT DO NOTHING so the race is
+    # resolved without an application-level error.
+    __table_args__ = (
+        UniqueConstraint("project_id", "citation_key", name="uq_papers_project_citation_key"),
+    )
 
     id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), primary_key=True, default=uuid4)
     project_id: Mapped[UUID] = mapped_column(

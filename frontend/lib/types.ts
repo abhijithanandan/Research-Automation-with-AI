@@ -28,6 +28,8 @@ export type PaperSource =
   | "semantic_scholar"
   | "arxiv"
   | "crossref"
+  | "core"
+  | "europe_pmc"
   | "upload";
 
 export type SectionName =
