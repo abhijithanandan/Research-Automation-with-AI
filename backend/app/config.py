@@ -22,7 +22,7 @@ class Settings(BaseSettings):
 
     llm_provider: Literal["gemini", "openai", "anthropic", "deepseek"] = "gemini"
     llm_api_key: str = ""
-    llm_model: str = "gemini-2.5-pro"
+    llm_model: str = "gemini-3.5-flash"
 
     database_url: str = "postgresql+asyncpg://researchflow:researchflow@localhost:5432/researchflow"
 
@@ -37,8 +37,23 @@ class Settings(BaseSettings):
     # Never enable in staging or production.
     dev_auth_bypass: bool = False
 
-    # Optional Semantic Scholar API key (increases rate limits).
+    # Optional Semantic Scholar API key (raises the rate limit 100→1000 req/min,
+    # avoiding the 429 throttling that otherwise drops SS from discovery results).
     semantic_scholar_api_key: str = ""
+
+    # Optional contact email — puts Crossref requests in the faster "polite pool".
+    crossref_mailto: str = ""
+
+    # Optional CORE API key — required for api.core.ac.uk/v3 access. Free tier
+    # registration at https://core.ac.uk/services/api. Without a key the CORE
+    # adapter degrades to a no-op (logs once and returns []), so the rest of
+    # the discovery pipeline keeps working.
+    core_api_key: str = ""
+
+    # Contact email for the Unpaywall API. Their ToS asks every request to
+    # identify the caller — without an email the unpaywall enricher is a
+    # no-op so we never send anonymous traffic to their service.
+    unpaywall_email: str = ""
 
     default_token_cap_usd: float = 5.0
     max_paper_candidates: int = Field(default=30, ge=1, le=200)

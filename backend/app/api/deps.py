@@ -101,10 +101,23 @@ CurrentUser = Annotated[User, Depends(get_current_user)]
 # Kept for backwards compat with any code that imported the old UUID sentinel.
 _STUB_USER_ID = UUID("00000000-0000-0000-0000-000000000001")
 
+# Frozen namespace UUID for deriving ResearchFlow user IDs from Firebase UIDs.
+# UUIDv5 within a stable namespace is the standard mechanism for "deterministic
+# UUID from a name" — far easier to reason about than the previous SHA-256
+# truncation, which was non-standard and made collision-space analysis fuzzy
+# (MED-2 reviewer finding). The namespace itself is a frozen v4 UUID; treating
+# it as the "researchflow.ai/users" domain keeps the mapping stable across
+# deployments while domain-separating from other UUIDv5 uses in the project.
+_RESEARCHFLOW_USER_NS = UUID("a3f12c14-7e51-4a89-9d3e-2b4f8c1c6e90")
+
 
 def _stable_uuid_from_uid(uid: str) -> UUID:
-    """Deterministic UUID from a Firebase UID string (no DB lookup needed)."""
-    import hashlib
+    """Deterministic UUID from a Firebase UID string (no DB lookup needed).
 
-    digest = hashlib.sha256(uid.encode()).digest()
-    return UUID(bytes=digest[:16])
+    Returns a UUIDv5 within the ResearchFlow user namespace. Collisions across
+    the ~2^122 effective space are vanishingly unlikely; uniqueness across
+    deployments is guaranteed by the frozen namespace UUID.
+    """
+    from uuid import uuid5
+
+    return uuid5(_RESEARCHFLOW_USER_NS, uid)

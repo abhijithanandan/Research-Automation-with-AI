@@ -101,12 +101,18 @@ class LLMGateway:
                 api_key=settings.llm_api_key,
                 model=settings.llm_model,
             )
+            self._model_name: str = settings.llm_model
         else:
             # v0.2: wire OpenAI / Anthropic / DeepSeek here.
             raise NotImplementedError(
                 f"LLM provider '{settings.llm_provider}' not yet supported. "
                 "Set LLM_PROVIDER=gemini for Phase 1."
             )
+
+    @property
+    def model_name(self) -> str:
+        """The active model identifier — written to audit_log (BRD FR-3.3)."""
+        return self._model_name
 
     async def complete(self, prompt: str, **kwargs: object) -> tuple[str, dict[str, object]]:
         """Complete a prompt. Returns (text, telemetry_dict).
@@ -116,6 +122,7 @@ class LLMGateway:
         _log.debug("llm_complete_start", prompt_len=len(prompt))
         text = await self._provider.complete(prompt, **kwargs)
         telemetry: dict[str, object] = {
+            "model": self._model_name,
             "tokens_in": len(prompt.split()),  # rough estimate until SDK exposes counts
             "tokens_out": len(text.split()),
             "cost_usd": None,  # TODO: wire real cost once Gemini SDK exposes it

@@ -21,8 +21,9 @@ from langgraph.types import Command
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.db.session import flush_for_background_dispatch
 from app.graph.state import GraphState
-from app.graph.workflow import build_graph
+from app.graph.workflow import NODE_AWAIT_SYNTHESIS, build_graph
 from app.models.db import ArtifactRow, AuditLogRow, PaperRow, ProjectRow, WorkflowRunRow
 from app.models.schemas import Paper, Phase, WorkflowRun
 from app.utils.logging import get_logger
@@ -121,7 +122,14 @@ async def _write_audit(
     actor: str,
     action: str,
     payload: dict[str, object],
+    model: str | None = None,
+    tokens_in: int | None = None,
+    tokens_out: int | None = None,
+    cost_usd: float | None = None,
 ) -> None:
+    """Append an audit_log row. The model/token/cost columns are optional —
+    populated for agent LLM calls so the per-project usage rollup and cost cap
+    (BRD FR-3.3, NFR-5) can be computed."""
     entry = AuditLogRow(
         id=uuid4(),
         project_id=project_id,
@@ -129,6 +137,10 @@ async def _write_audit(
         actor=actor,
         action=action,
         payload=payload,
+        model=model,
+        tokens_in=tokens_in,
+        tokens_out=tokens_out,
+        cost_usd=cost_usd,
         created_at=datetime.now(tz=UTC),
     )
     session.add(entry)
@@ -147,43 +159,96 @@ async def _persist_candidates(
 ) -> None:
     """Upsert candidate papers into the `papers` table.
 
-    Keyed by (project_id, citation_key) — idempotent on re-runs.
+    Atomic per (project_id, citation_key) via PostgreSQL ``ON CONFLICT DO
+    NOTHING``. Closes the check-then-insert race that previously could create
+    duplicate rows when two discovery runs raced on the same project (audit
+    round-3, CRIT-2). The unique constraint on (project_id, citation_key) is
+    enforced by Alembic revision 0002.
+
     All rows are written with approved=False regardless of input
     (invariant from docs/agents/librarian.md §Invariants).
     """
+    if not papers:
+        return
     now = datetime.now(tz=UTC)
-    for paper in papers:
-        # Check if a row with this (project_id, citation_key) already exists.
-        existing = (
-            (
-                await session.execute(
-                    select(PaperRow).where(
-                        PaperRow.project_id == project_id,
-                        PaperRow.citation_key == paper.citation_key,
-                    )
-                )
+    rows = [
+        {
+            "id": paper.id,
+            "project_id": project_id,
+            "source": paper.source,
+            "external_id": paper.external_id,
+            "title": paper.title,
+            "authors": list(paper.authors),
+            "year": paper.year,
+            "abstract": paper.abstract,
+            "pdf_url": str(paper.pdf_url) if paper.pdf_url else None,
+            "citation_key": paper.citation_key,
+            "citation_count": paper.citation_count,
+            "approved": False,  # invariant — never trust input
+            "added_at": now,
+        }
+        for paper in papers
+    ]
+    # Use dialect-native ON CONFLICT so the insert stays atomic per row and
+    # the test path (SQLite) and prod path (Postgres) exercise the same
+    # semantics. SQLite supports ON CONFLICT since 3.24 (aiosqlite ships a
+    # recent SQLite).
+    dialect = session.bind.dialect.name if session.bind is not None else "postgresql"
+    if dialect == "postgresql":
+        from sqlalchemy.dialects.postgresql import insert as pg_insert
+
+        pg_stmt = (
+            pg_insert(PaperRow)
+            .values(rows)
+            .on_conflict_do_nothing(
+                index_elements=["project_id", "citation_key"],
             )
-            .scalars()
-            .first()
         )
+        await session.execute(pg_stmt)
+    else:
+        from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+
+        sqlite_stmt = (
+            sqlite_insert(PaperRow)
+            .values(rows)
+            .on_conflict_do_nothing(
+                index_elements=["project_id", "citation_key"],
+            )
+        )
+        await session.execute(sqlite_stmt)
+    _ = run_id  # reserved for future audit linkage
+
+
+async def _persist_artifacts(
+    session: AsyncSession,
+    project_id: UUID,
+    run_id: UUID,
+    artifacts: list[dict[str, Any]],
+) -> None:
+    """Insert Critic-produced artifacts (matrix, summary) into the `artifacts` table.
+
+    Each artifact dict is the JSON dump of an `Artifact` schema. Idempotent on
+    re-runs: an artifact whose id already exists is skipped.
+    """
+    now = datetime.now(tz=UTC)
+    for art in artifacts:
+        art_id = UUID(str(art["id"]))
+        existing = await session.get(ArtifactRow, art_id)
         if existing is not None:
             continue
-        row = PaperRow(
-            id=paper.id,
-            project_id=project_id,
-            source=paper.source,
-            external_id=paper.external_id,
-            title=paper.title,
-            authors=list(paper.authors),
-            year=paper.year,
-            abstract=paper.abstract,
-            pdf_url=str(paper.pdf_url) if paper.pdf_url else None,
-            citation_key=paper.citation_key,
-            citation_count=paper.citation_count,
-            approved=False,  # invariant — never trust input
-            added_at=now,
+        session.add(
+            ArtifactRow(
+                id=art_id,
+                project_id=project_id,
+                kind=str(art["kind"]),
+                label=str(art["label"]),
+                content=str(art["content"]),
+                mime_type=str(art["mime_type"]),
+                produced_by=str(art["produced_by"]),
+                created_at=now,
+            )
         )
-        session.add(row)
+    _ = run_id  # reserved for future audit linkage
 
 
 # ---------------------------------------------------------------------------
@@ -249,9 +314,10 @@ async def start_workflow(
         .values(status="active", updated_at=now)
     )
 
-    # Commit now so _run_graph's fresh session sees the new WorkflowRunRow.
-    # Without this, the background task could start before the row is visible.
-    await session.commit()
+    # Make the WorkflowRunRow visible to _run_graph's fresh session before
+    # we hand off. Named helper instead of bare session.commit() — see
+    # app/db/session.py docstring for the contract (audit round-3, MED-2).
+    await flush_for_background_dispatch(session)
 
     # Dispatch the graph in the background so the HTTP response returns quickly.
     # Keep a strong reference to prevent the task being GC'd before completion.
@@ -325,31 +391,82 @@ async def _run_graph(
             },
         )
         await _emit(
-            project_id, {"type": "agent.completed", "agent": "librarian", "run_id": str(run_id)}
+            project_id,
+            {
+                "type": "agent.completed",
+                "agent": "librarian",
+                "run_id": str(run_id),
+                "artifact_ids": [],
+            },
         )
+    except asyncio.CancelledError:
+        # Lifespan shutdown / task cancellation — propagate, do NOT mark as error.
+        raise
     except Exception as exc:
-        # GraphInterrupt is handled by LangGraph internally (ainvoke returns, not raises).
-        # Any exception reaching here is a genuine failure.
-        _log.error("graph_run_error", run_id=str(run_id), error=str(exc))
+        # Background-task isolation: any uncaught exception here would crash the
+        # task silently. We keep a broad catch but emit the exception *class* as
+        # a structured field so incident diagnostics (round-4 MED-4) aren't
+        # reduced to a single free-text "error" string.
+        # GraphInterrupt is handled by LangGraph internally (ainvoke returns,
+        # not raises) — anything reaching here is a genuine failure.
+        error_code = type(exc).__name__
+        _log.error(
+            "graph_run_error",
+            run_id=str(run_id),
+            error_code=error_code,
+            error=str(exc),
+            exc_info=True,
+        )
         async with get_session() as bg_session:
             await _update_run_state(bg_session, run_id, "error")
         await _emit(
             project_id,
-            {"type": "agent.error", "agent": "librarian", "run_id": str(run_id), "error": str(exc)},
+            {
+                "type": "agent.error",
+                "agent": "librarian",
+                "run_id": str(run_id),
+                "error_code": error_code,
+                "error": str(exc),
+            },
         )
 
 
-async def _update_run_state(session: AsyncSession, run_id: UUID, new_state: str) -> None:
+async def _update_run_state(
+    session: AsyncSession,
+    run_id: UUID,
+    new_state: str,
+    new_phase: Phase | None = None,
+) -> None:
+    """Update WorkflowRun.state and (optionally) WorkflowRun.phase.
+
+    The ``phase`` column used to drift from reality — it stayed at the
+    initial "discovery" forever, even after the graph moved into synthesis
+    and drafting. That broke phase-dependent enforcement (paper-pool lock,
+    UI status) on long-running projects. Callers that know the post-transition
+    phase pass it here; callers that don't (mid-state updates) omit it.
+    """
     now = datetime.now(tz=UTC)
     values: dict[str, object] = {"state": new_state, "last_event_at": now}
     if new_state == "awaiting_approval":
         values["awaiting_since"] = now
+    if new_phase is not None:
+        values["phase"] = new_phase.value
     await session.execute(
         update(WorkflowRunRow).where(WorkflowRunRow.id == run_id).values(**values)
     )
     # No commit here — callers own the transaction:
     # _run_graph uses get_session() which auto-commits on clean exit;
     # route handlers use DbSession whose get_session() also auto-commits.
+
+
+# Phase machine — what each HITL gate transitions into on approve/override.
+# Used by both approve_workflow and override_workflow so the DB run.phase
+# tracks the LangGraph state machine (MED-1 reviewer finding).
+_NEXT_PHASE_AFTER_GATE: dict[str, Phase] = {
+    Phase.DISCOVERY.value: Phase.SYNTHESIS,
+    Phase.SYNTHESIS.value: Phase.DRAFTING,
+    Phase.DRAFTING.value: Phase.DONE,
+}
 
 
 async def approve_workflow(
@@ -366,7 +483,7 @@ async def approve_workflow(
     Graph resume is dispatched to a background task so the HTTP handler returns
     immediately without blocking on the next phase's LLM calls.
     """
-    await _assert_awaiting(session, run_id)
+    run = await _assert_awaiting(session, run_id)
 
     # Build the approved pool from DB — these are the papers the user toggled
     # via PATCH /papers/{id} before calling approve.
@@ -403,7 +520,11 @@ async def approve_workflow(
     ]
     citation_keys = [r.citation_key for r in approved_rows]
 
-    await _update_run_state(session, run_id, "approved")
+    # Approving a gate transitions the workflow into the next phase. From
+    # discovery → synthesis; from synthesis → drafting; etc. Persist the
+    # phase change so the paper-lock rule and UI status see consistent state.
+    next_phase = _NEXT_PHASE_AFTER_GATE.get(run.phase)
+    await _update_run_state(session, run_id, "approved", new_phase=next_phase)
     await _write_audit(
         session,
         project_id=project_id,
@@ -420,8 +541,9 @@ async def approve_workflow(
         action="phase_1.approved_pool",
         payload={"citation_keys": citation_keys, "count": len(citation_keys)},
     )
-    # Commit so the background task sees the updated state.
-    await session.commit()
+    # Make state visible to the background resume task. Named helper per the
+    # audit-round-3 commit-ownership contract (see app/db/session.py).
+    await flush_for_background_dispatch(session)
 
     # Dispatch graph resume to background — the next phase may involve long LLM calls.
     graph = get_compiled_graph()
@@ -439,9 +561,11 @@ async def approve_workflow(
     _background_tasks.add(task)
     task.add_done_callback(_background_tasks.discard)
 
-    # Return the freshly updated run state.
-    run = await session.get(WorkflowRunRow, run_id)
-    return _run_to_schema(run)  # type: ignore[arg-type]
+    # Return the freshly updated run state. Re-read so we surface the new
+    # state/phase the route just committed.
+    refreshed = await session.get(WorkflowRunRow, run_id)
+    assert refreshed is not None  # _assert_awaiting already verified existence
+    return _run_to_schema(refreshed)
 
 
 async def override_workflow(
@@ -460,7 +584,7 @@ async def override_workflow(
     (action='user.override'), then resumes the graph in the background with the
     artifact injected into state['last_override'] (SPEC §7.3).
     """
-    await _assert_awaiting(session, run_id)
+    run = await _assert_awaiting(session, run_id)
 
     now = datetime.now(tz=UTC)
     artifact = ArtifactRow(
@@ -502,8 +626,12 @@ async def override_workflow(
         "created_at": now.isoformat(),
     }
 
-    await _update_run_state(session, run_id, "approved")
-    await session.commit()
+    # An override advances the gate just like an approve — bump the persisted
+    # phase to the next phase in the state machine (MED-1 reviewer finding).
+    next_phase = _NEXT_PHASE_AFTER_GATE.get(run.phase)
+    await _update_run_state(session, run_id, "approved", new_phase=next_phase)
+    # Flush for background resume — named helper per the commit-ownership contract.
+    await flush_for_background_dispatch(session)
 
     graph = get_compiled_graph()
     config = {"configurable": {"thread_id": str(run_id)}}
@@ -520,8 +648,9 @@ async def override_workflow(
     _background_tasks.add(task)
     task.add_done_callback(_background_tasks.discard)
 
-    run = await session.get(WorkflowRunRow, run_id)
-    return _run_to_schema(run)  # type: ignore[arg-type]
+    refreshed = await session.get(WorkflowRunRow, run_id)
+    assert refreshed is not None  # _assert_awaiting already verified existence
+    return _run_to_schema(refreshed)
 
 
 async def reject_workflow(
@@ -547,12 +676,20 @@ async def reject_workflow(
         action="user.reject",
         payload={"user_id": str(user_id), "feedback": feedback},
     )
-    await session.commit()
+    # Flush for background reject task — named helper per the commit-ownership contract.
+    await flush_for_background_dispatch(session)
 
     graph = get_compiled_graph()
     config = {"configurable": {"thread_id": str(run_id)}}
     task = asyncio.create_task(
-        _resume_graph(project_id, run_id, graph, config, Command(resume="reject"), "running")
+        _resume_graph(
+            project_id,
+            run_id,
+            graph,
+            config,
+            Command(resume="reject", update={"last_feedback": feedback}),
+            "running",
+        )
     )
     _background_tasks.add(task)
     task.add_done_callback(_background_tasks.discard)
@@ -600,9 +737,45 @@ async def _resume_graph(
     command: Command[Any],
     done_state: str,
 ) -> None:
-    """Run graph.ainvoke in a background task and emit the completion event."""
+    """Run graph.ainvoke in a background task and emit the right follow-up event.
+
+    After resuming, the graph may *interrupt again* at the next HITL gate
+    (e.g. the Phase 2 synthesis gate). We detect that by inspecting
+    `graph.aget_state(...).next` — a non-empty tuple means the graph is parked
+    at a gate. In that case we persist the produced artifacts, set the DB state
+    back to `awaiting_approval`, and emit `approval.required` instead of
+    `state.changed`.
+    """
+    # Late import mirrors the pattern used by _run_graph to avoid circular deps.
+    from app.db.session import get_session
+
     try:
         await graph.ainvoke(command, config)
+        snapshot = await graph.aget_state(config)
+
+        if snapshot.next and snapshot.next[0] == NODE_AWAIT_SYNTHESIS:
+            # Graph paused at the Phase 2 synthesis gate.
+            await _handle_gate_pause(project_id, run_id, snapshot, get_session)
+            return
+
+        if snapshot.next:
+            # Graph paused at a Phase 1 gate again (e.g. after a reject re-runs discover).
+            # DB state is already updated to awaiting_approval by the caller; just re-emit
+            # the correct phase-1 approval.required event.
+            async with get_session() as bg_session:
+                await _update_run_state(bg_session, run_id, "awaiting_approval")
+            await _emit(
+                project_id,
+                {
+                    "type": "approval.required",
+                    "phase": Phase.DISCOVERY.value,
+                    "run_id": str(run_id),
+                    "summary": "Paper candidates are ready for your review.",
+                },
+            )
+            return
+
+        # The graph ran to completion (no further gate).
         ws_state = "approved" if done_state == "approved" else "running"
         ws_phase = Phase.SYNTHESIS.value if done_state == "approved" else Phase.DISCOVERY.value
         await _emit(
@@ -614,17 +787,97 @@ async def _resume_graph(
                 "run_id": str(run_id),
             },
         )
+    except asyncio.CancelledError:
+        raise
     except Exception as exc:
-        _log.error("graph_resume_error", run_id=str(run_id), error=str(exc))
-        # Late import mirrors the pattern used by _run_graph to avoid circular deps.
-        from app.db.session import get_session
-
+        # See MED-4 note on the sibling handler in _run_graph: keep the broad
+        # catch (background-task isolation) but emit the exception class as a
+        # structured error_code so incidents are diagnosable from logs/UI.
+        error_code = type(exc).__name__
+        _log.error(
+            "graph_resume_error",
+            run_id=str(run_id),
+            error_code=error_code,
+            error=str(exc),
+            exc_info=True,
+        )
         async with get_session() as bg_session:
             await _update_run_state(bg_session, run_id, "error")
         await _emit(
             project_id,
-            {"type": "agent.error", "run_id": str(run_id), "error": str(exc)},
+            {
+                "type": "agent.error",
+                "run_id": str(run_id),
+                "error_code": error_code,
+                "error": str(exc),
+            },
         )
+
+
+async def _handle_gate_pause(
+    project_id: UUID,
+    run_id: UUID,
+    snapshot: Any,
+    get_session: Any,
+) -> None:
+    """Persist Phase 2 artifacts and re-arm the gate after a synthesis pause."""
+    values = snapshot.values
+    matrix = values.get("matrix")
+    summary = values.get("summary")
+    artifacts = [a for a in (matrix, summary) if a is not None]
+    # Token/cost rollup the Critic accumulated across its LLM calls.
+    usage: dict[str, Any] = values.get("synthesis_usage") or {}
+
+    async with get_session() as bg_session:
+        if artifacts:
+            await _persist_artifacts(bg_session, project_id, run_id, artifacts)
+        await _update_run_state(bg_session, run_id, "awaiting_approval")
+        await _write_audit(
+            bg_session,
+            project_id=project_id,
+            workflow_run_id=run_id,
+            actor="system",
+            action="phase_2.synthesis_ready",
+            payload={"artifact_count": len(artifacts)},
+        )
+        # Record the Critic's LLM usage so per-project token/cost rollups and
+        # the cost cap can be computed (BRD FR-3.3, §4.3 audit trail, NFR-5).
+        if usage:
+            await _write_audit(
+                bg_session,
+                project_id=project_id,
+                workflow_run_id=run_id,
+                actor="critic",
+                action="agent.invoke",
+                payload={
+                    "agent": "critic",
+                    "llm_calls": usage.get("llm_calls", 0),
+                },
+                model=usage.get("model"),
+                tokens_in=usage.get("tokens_in"),
+                tokens_out=usage.get("tokens_out"),
+                cost_usd=usage.get("cost_usd"),
+            )
+
+    artifact_ids = [str(a["id"]) for a in artifacts if a.get("id")]
+    await _emit(
+        project_id,
+        {
+            "type": "agent.completed",
+            "agent": "critic",
+            "run_id": str(run_id),
+            "artifact_ids": artifact_ids,
+        },
+    )
+    await _emit(
+        project_id,
+        {
+            "type": "approval.required",
+            "phase": Phase.SYNTHESIS.value,
+            "run_id": str(run_id),
+            "summary": "The literature synthesis is ready for your review.",
+        },
+    )
 
 
 def _run_to_schema(run: WorkflowRunRow) -> WorkflowRun:

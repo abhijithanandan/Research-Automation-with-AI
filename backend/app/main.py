@@ -29,6 +29,21 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
 
     _log = structlog.get_logger(__name__)
 
+    # Hard production-safety guard: DEV_AUTH_BYPASS makes every request
+    # authenticate as the fixed dev user. Shipping that in staging or
+    # production would let any client impersonate any user. Refuse to boot
+    # rather than rely on operators noticing a misconfiguration (audit
+    # round-3, EXPLOIT-1).
+    if settings.dev_auth_bypass and settings.app_env != "development":
+        _log.error(
+            "dev_auth_bypass_in_non_dev",
+            app_env=settings.app_env,
+        )
+        raise RuntimeError(
+            "DEV_AUTH_BYPASS=true is only permitted with APP_ENV=development. "
+            f"Refusing to start with APP_ENV='{settings.app_env}'."
+        )
+
     async def _cleanup_orphaned_runs() -> None:
         try:
             async with get_session() as session:
@@ -50,8 +65,23 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         checkpointer = await create_postgres_checkpointer(settings.database_url)
         _log.info("checkpointer_postgres_ready")
     except Exception as exc:
-        # Postgres unavailable (no Docker in dev) — fall back to in-memory checkpointer.
-        # WARNING: state is lost on restart. Never use in production.
+        # Postgres unavailable. In development we degrade to an in-memory
+        # checkpointer so the app still boots without Docker. Outside of
+        # development this is a hard failure — silently losing workflow
+        # state across restart would shred the audit trail (audit round-3,
+        # HIGH-2). Refuse to start and let the operator fix Postgres.
+        if settings.app_env != "development":
+            _log.error(
+                "checkpointer_postgres_required",
+                app_env=settings.app_env,
+                reason=str(exc),
+            )
+            raise RuntimeError(
+                "Postgres checkpointer is required outside development. "
+                f"App refusing to start with app_env='{settings.app_env}'. "
+                "Fix DATABASE_URL or set APP_ENV=development for local work."
+            ) from exc
+
         from langgraph.checkpoint.memory import MemorySaver
 
         checkpointer = MemorySaver()

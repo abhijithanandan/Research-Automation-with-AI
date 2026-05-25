@@ -120,7 +120,60 @@ async def _assert_owned(db: DbSession, project_id: UUID, user_id: UUID) -> None:
 
 
 async def _assert_phase_not_locked(db: DbSession, project_id: UUID) -> None:
-    """Raise 409 if Phase 1 has already been approved (pool is locked)."""
+    """Raise 409 if the paper pool is locked.
+
+    Authoritative locking rule (defense-in-depth, audit round-4 LOW-MED):
+
+    Layer 1 — audit marker (authoritative):
+      If the audit log contains an action="phase_1.approved_pool" entry for
+      this project, the pool is **permanently** locked. This is the canonical
+      record of approval written by approve_workflow at the moment the user
+      confirmed the pool. A row in audit_log is append-only and survives
+      state-machine resets, run reruns, and admin tinkering with run.state.
+
+    Layer 2 — run-state heuristic (covers the gap before the audit row
+    is committed and legacy runs):
+      - Locked once the workflow advances past DISCOVERY (any later phase,
+        regardless of run.state) — the pool is now an input to Critic / Scribe
+        and must not change underneath them.
+      - Locked when state == "approved" — backstop for legacy runs whose
+        ``phase`` column wasn't bumped before MED-1 landed; their phase still
+        reads "discovery" even after approval.
+      - Locked on state == "error" — broken runs need admin intervention,
+        not user edits.
+
+    Either layer firing is sufficient to lock. The audit-marker layer exists
+    so that even if some future bug corrupts run.phase/run.state, the
+    immutable audit record still enforces the invariant.
+
+    Previously the rule required *both* state == "approved" AND phase ==
+    "discovery" — that combination is mutually exclusive after MED-1, which
+    meant the lock never fired and users could mutate the pool after
+    synthesis had already started.
+    """
+    # Layer 1: audit marker. One indexed query — cheap, and authoritative.
+    audit_marker = (
+        (
+            await db.execute(
+                select(AuditLogRow.id)
+                .where(AuditLogRow.project_id == project_id)
+                .where(AuditLogRow.action == "phase_1.approved_pool")
+                .limit(1)
+            )
+        )
+        .scalars()
+        .first()
+    )
+    if audit_marker is not None:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            detail={
+                "code": "phase_locked",
+                "message": "Cannot modify papers after Phase 1 approval.",
+            },
+        )
+
+    # Layer 2: run-state heuristic.
     run = (
         (
             await db.execute(
@@ -134,7 +187,10 @@ async def _assert_phase_not_locked(db: DbSession, project_id: UUID) -> None:
         .first()
     )
 
-    if run is not None and run.state in ("approved",) and run.phase == "discovery":
+    if run is None:
+        return
+    locked = run.phase != "discovery" or run.state == "approved" or run.state == "error"
+    if locked:
         raise HTTPException(
             status.HTTP_409_CONFLICT,
             detail={
