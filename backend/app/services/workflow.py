@@ -19,6 +19,7 @@ from uuid import UUID, uuid4
 from fastapi import HTTPException, status
 from langgraph.types import Command
 from sqlalchemy import select, update
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.session import flush_for_background_dispatch
@@ -282,20 +283,27 @@ async def start_workflow(
     if project is None:
         raise ValueError(f"Project {project_id} not found")
 
-    # Check for an existing active run.
-    existing = (
-        (
-            await session.execute(
-                select(WorkflowRunRow).where(
-                    WorkflowRunRow.project_id == project_id,
-                    WorkflowRunRow.state.in_(["running", "awaiting_approval"]),
+    # Check for an existing active run. The partial unique index
+    # `uq_workflow_runs_active_project` (alembic 0004) makes this insert
+    # race-safe at the DB layer: even if two concurrent start_workflow
+    # calls both see no existing row, only the first INSERT succeeds —
+    # the second raises IntegrityError which we catch below and resolve
+    # by re-fetching the winner's row.
+    async def _fetch_active_run() -> WorkflowRunRow | None:
+        return (
+            (
+                await session.execute(
+                    select(WorkflowRunRow).where(
+                        WorkflowRunRow.project_id == project_id,
+                        WorkflowRunRow.state.in_(["running", "awaiting_approval"]),
+                    )
                 )
             )
+            .scalars()
+            .first()
         )
-        .scalars()
-        .first()
-    )
 
+    existing = await _fetch_active_run()
     if existing is not None:
         _log.info("workflow_resume", run_id=str(existing.id))
         return _run_to_schema(existing)
@@ -311,7 +319,23 @@ async def start_workflow(
         last_event_at=now,
     )
     session.add(run)
-    await session.flush()  # get the id before committing
+    try:
+        await session.flush()  # get the id before committing
+    except IntegrityError:
+        # Lost the race: a concurrent caller inserted an active run for
+        # this project between our SELECT and INSERT. Roll back the failed
+        # add, re-fetch the winner, and return that — observationally
+        # identical to the "existing is not None" branch above.
+        await session.rollback()
+        winner = await _fetch_active_run()
+        if winner is None:
+            # The active run vanished (state moved to approved/error)
+            # between the IntegrityError and the re-fetch. Re-raise so
+            # the caller surfaces a clear error rather than silently
+            # returning None.
+            raise
+        _log.info("workflow_race_lost_resumed", run_id=str(winner.id))
+        return _run_to_schema(winner)
 
     await _write_audit(
         session,
@@ -774,9 +798,14 @@ async def _resume_graph(
             return
 
         if snapshot.next:
-            # Graph paused at a Phase 1 gate again (e.g. after a reject re-runs discover).
-            # DB state is already updated to awaiting_approval by the caller; just re-emit
-            # the correct phase-1 approval.required event.
+            # Graph paused at a Phase 1 gate again (e.g. after a reject re-runs
+            # discover). The Phase 2 synthesis gate is handled by the branch
+            # above (line ~771); anything reaching here is — by exclusion — a
+            # Phase 1 re-pause, so Phase.DISCOVERY is correct by construction.
+            # (snapshot.next[0] is a *node name* like NODE_AWAIT_POOL_APPROVAL,
+            # not a phase enum — see graph/workflow.py.)
+            # DB state is already updated to awaiting_approval by the caller;
+            # just re-emit the correct phase-1 approval.required event.
             async with get_session() as bg_session:
                 await _update_run_state(bg_session, run_id, "awaiting_approval")
             await _emit(

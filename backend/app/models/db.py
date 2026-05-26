@@ -6,7 +6,17 @@ from datetime import datetime
 from typing import Any
 from uuid import UUID, uuid4
 
-from sqlalchemy import JSON, TIMESTAMP, ForeignKey, Numeric, String, Text, UniqueConstraint
+from sqlalchemy import (
+    JSON,
+    TIMESTAMP,
+    ForeignKey,
+    Index,
+    Numeric,
+    String,
+    Text,
+    UniqueConstraint,
+    text,
+)
 from sqlalchemy.dialects.postgresql import UUID as PGUUID
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
@@ -47,6 +57,24 @@ class ProjectRow(Base):
 
 class WorkflowRunRow(Base):
     __tablename__ = "workflow_runs"
+    # Partial unique index: at most one active run per project. The
+    # read-then-insert pattern in services.workflow.start_workflow is
+    # not atomic; two concurrent invocations could both find no active
+    # run and both insert. The DB index makes the second insert raise
+    # IntegrityError, which the service catches and resolves by returning
+    # the winner's row.
+    __table_args__ = (
+        Index(
+            "uq_workflow_runs_active_project",
+            "project_id",
+            unique=True,
+            # SQLAlchemy 2.x rejects raw strings for index WHERE clauses
+            # (the SQLite dialect compiles the expression directly). text()
+            # wraps a literal SQL fragment that both dialects accept.
+            postgresql_where=text("state IN ('running', 'awaiting_approval')"),
+            sqlite_where=text("state IN ('running', 'awaiting_approval')"),
+        ),
+    )
 
     id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), primary_key=True, default=uuid4)
     project_id: Mapped[UUID] = mapped_column(
