@@ -13,6 +13,7 @@ dist/
 .ruff_cache/
 .coverage
 htmlcov/
+cov_annotate/
 .tox/
 
 # Virtual envs
@@ -39,6 +40,7 @@ playwright/.cache/
 # --- IDE / OS ---
 .idea/
 .vscode/
+.vs/
 *.swp
 *.swo
 .DS_Store

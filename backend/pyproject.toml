@@ -32,6 +32,10 @@ dependencies = [
     "python-Levenshtein>=0.25",
     "tenacity>=8.3",
     "email-validator>=2.0",
+    # Phase 2 full-text RAG: download open-access PDFs we already have URLs
+    # for (Semantic Scholar openAccessPdf, arXiv) and embed into ChromaDB for
+    # the Critic's RAG context (BRD FR-1.2 — local document parser).
+    "pypdf>=4.0",
 ]
 
 [project.optional-dependencies]
@@ -45,6 +49,7 @@ dev = [
     "types-requests",
     "respx>=0.21",
     "aiosqlite>=0.20",
+    "jsonschema>=4.20",
 ]
 
 [build-system]

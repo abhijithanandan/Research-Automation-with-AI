@@ -4,6 +4,9 @@ set -euo pipefail
 
 cd "$(dirname "$0")"
 
+echo "==> preflight (required deps)"
+python scripts/preflight.py
+
 echo "==> ruff check"
 ruff check .
 
