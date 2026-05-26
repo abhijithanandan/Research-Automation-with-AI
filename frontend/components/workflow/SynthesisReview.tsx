@@ -51,9 +51,13 @@ function parseMatrix(content: string): MatrixModel | null {
   }
 }
 
-// Provider errors (Gemini, etc.) arrive as a huge JSON blob. Categorize the
-// known shapes so the UI can render a short, actionable message AND offer
-// the right recovery affordance (retry vs. wait vs. configure).
+// Provider error blobs from any upstream LLM/HTTP call arrive as opaque
+// strings. Categorize the known shapes so the UI can render a short,
+// actionable message AND offer the right recovery affordance
+// (retry vs. wait vs. reconfigure). Copy is intentionally provider-agnostic
+// so swapping providers (Gemini → Anthropic → OpenAI → …) needs no UI
+// change (coderabbit PR #5 finding G3). The status-code regexes still
+// detect the underlying failure category regardless of provider.
 type ErrorKind = "quota" | "overload" | "auth" | "schema" | "network" | "unknown";
 
 interface ClassifiedError {
@@ -75,30 +79,35 @@ function classifyError(raw: string | null): ClassifiedError {
       retryable: true,
     };
   }
-  // Gemini 429 — hard quota exhaustion on the daily/minute budget.
+  // 429 / RESOURCE_EXHAUSTED — hard quota exhaustion.
   if (/RESOURCE_EXHAUSTED/.test(raw) || /\b429\b/.test(raw)) {
     return {
       kind: "quota",
-      message: "Gemini API quota exhausted (HTTP 429).",
-      hint: "The free-tier daily budget is spent. Wait for the quota reset (24h) or upgrade the API plan.",
+      message: "LLM API quota exhausted (HTTP 429).",
+      hint: "The provider's request/token budget is spent. Wait for the quota window to reset, or upgrade the API plan.",
       retryable: false,
     };
   }
-  // Gemini 503 — transient model overload. Retrying in a minute usually works.
+  // 503 / UNAVAILABLE / "high demand" — transient upstream overload.
   if (/UNAVAILABLE/.test(raw) || /\b503\b/.test(raw) || /experiencing high demand/i.test(raw)) {
     return {
       kind: "overload",
-      message: "Gemini model is temporarily overloaded (HTTP 503).",
+      message: "The LLM provider is temporarily overloaded (HTTP 503).",
       hint: "This is transient. Wait 30–60 seconds, then click Reject & regenerate.",
       retryable: true,
     };
   }
-  // 401/403 — bad or missing API key.
-  if (/\b401\b/.test(raw) || /\b403\b/.test(raw) || /UNAUTHENTICATED/.test(raw) || /PERMISSION_DENIED/.test(raw)) {
+  // 401 / 403 — bad or missing credentials.
+  if (
+    /\b401\b/.test(raw) ||
+    /\b403\b/.test(raw) ||
+    /UNAUTHENTICATED/.test(raw) ||
+    /PERMISSION_DENIED/.test(raw)
+  ) {
     return {
       kind: "auth",
-      message: "The LLM API key is invalid or missing the required permissions.",
-      hint: "Update GOOGLE_API_KEY in backend/.env and restart the backend.",
+      message: "The LLM API key is invalid or lacks the required permissions.",
+      hint: "Check the backend's API key configuration and the provider's permission docs.",
       retryable: false,
     };
   }
@@ -107,7 +116,7 @@ function classifyError(raw: string | null): ClassifiedError {
     return {
       kind: "schema",
       message: "The paper's abstract could not be processed by the model.",
-      hint: "The abstract may be empty, too long, or flagged by safety filters.",
+      hint: "The abstract may be empty, too long, or flagged by the provider's safety filters.",
       retryable: false,
     };
   }
@@ -115,7 +124,7 @@ function classifyError(raw: string | null): ClassifiedError {
   if (/ECONNRESET|ETIMEDOUT|getaddrinfo|connection|timeout/i.test(raw)) {
     return {
       kind: "network",
-      message: "Could not reach the Gemini API.",
+      message: "Could not reach the LLM API.",
       hint: "Check the backend's network access and DNS, then regenerate.",
       retryable: true,
     };
@@ -916,8 +925,25 @@ export function SynthesisReadOnly({
 
   const summaryContent = summary?.content ?? "";
   const synthesisIdx = summaryContent.search(/##\s*Synthesis\b/i);
+  // Split the summary at "## Synthesis": the part before is the matrix
+  // (markdown table), the part from "## Synthesis" onward is the narrative.
+  // After an override the user may have edited the matrix-portion markdown
+  // directly; we MUST render that edited markdown instead of the original
+  // matrix JSON artifact, otherwise saved edits look like they were dropped
+  // (coderabbit PR #5 finding G2).
+  const matrixMarkdown =
+    synthesisIdx >= 0 ? summaryContent.slice(0, synthesisIdx).trim() : "";
   const narrative =
     synthesisIdx >= 0 ? summaryContent.slice(synthesisIdx) : summaryContent;
+
+  // Heuristic: the matrix portion is considered "user-overridden" when it
+  // contains a GFM table (a "| --- |" separator row). In that case we trust
+  // the markdown as the source of truth and render it through react-markdown.
+  // Otherwise — fresh Critic output, or no matrix portion at all — fall back
+  // to the structured MatrixTable driven by the JSON matrix artifact.
+  const matrixHasTable = /\n\s*\|\s*[-:|]+(\s*\|\s*[-:|]+)+\s*\|/.test(
+    "\n" + matrixMarkdown,
+  );
 
   if (!matrix && !summary) {
     return (
@@ -929,13 +955,25 @@ export function SynthesisReadOnly({
 
   return (
     <div className="space-y-5">
-      {parsedMatrix && parsedMatrix.rows.length > 0 && (
+      {matrixHasTable ? (
         <section>
           <h3 className="mb-2 text-xs font-semibold uppercase tracking-wider text-slate-400">
             Comparison matrix
           </h3>
-          <MatrixTable rows={parsedMatrix.rows} paperByKey={paperByKey} />
+          <div className="rounded-lg border border-[#1e2d45] bg-[#0a0f1e] px-4 py-4">
+            <Markdown content={matrixMarkdown} />
+          </div>
         </section>
+      ) : (
+        parsedMatrix &&
+        parsedMatrix.rows.length > 0 && (
+          <section>
+            <h3 className="mb-2 text-xs font-semibold uppercase tracking-wider text-slate-400">
+              Comparison matrix
+            </h3>
+            <MatrixTable rows={parsedMatrix.rows} paperByKey={paperByKey} />
+          </section>
+        )
       )}
 
       {narrative.trim() && (

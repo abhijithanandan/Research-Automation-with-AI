@@ -633,8 +633,10 @@ export default function HomePage() {
                   {/* Phase 2: final synthesis read-only view — reuses the
                       MatrixTable + narrative split from the HITL review so
                       tables stay as real <table>s instead of being mushed
-                      into a single paragraph by raw-Markdown rendering. */}
-                  {synthesisDone && summary && (
+                      into a single paragraph by raw-Markdown rendering.
+                      Show when *either* artifact is present so a matrix-only
+                      result is still visible if the narrative LLM call failed. */}
+                  {synthesisDone && (summary || matrix) && (
                     <SynthesisReadOnly matrix={matrix} summary={summary} papers={papers} />
                   )}
 
