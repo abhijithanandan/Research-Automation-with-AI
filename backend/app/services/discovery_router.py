@@ -135,16 +135,6 @@ class DiscoveryService:
                     )
                 else:
                     result = await adapter.search(query, max_per_source, client)
-                papers.extend(result)
-                consecutive_empty = 0 if result else consecutive_empty + 1
-                if consecutive_empty >= 2 and i < len(queries) - 1:
-                    _log.warning(
-                        "discovery_source_short_circuited",
-                        source=type(adapter).__name__,
-                        consecutive_empty=consecutive_empty,
-                        skipped_queries=len(queries) - i - 1,
-                    )
-                    break
             except Exception as exc:  # one query must not sink the whole source
                 _log.warning(
                     "discovery_query_error",
@@ -152,4 +142,18 @@ class DiscoveryService:
                     query=query,
                     error=str(exc),
                 )
+                # Treat the failure the same as an empty result so a source
+                # that keeps raising trips the short-circuit instead of
+                # blocking the run for minutes (coderabbit PR #5 finding).
+                result = []
+            papers.extend(result)
+            consecutive_empty = 0 if result else consecutive_empty + 1
+            if consecutive_empty >= 2 and i < len(queries) - 1:
+                _log.warning(
+                    "discovery_source_short_circuited",
+                    source=type(adapter).__name__,
+                    consecutive_empty=consecutive_empty,
+                    skipped_queries=len(queries) - i - 1,
+                )
+                break
         return papers

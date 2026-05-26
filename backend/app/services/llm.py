@@ -65,17 +65,33 @@ class GeminiProvider:
         return response.text or ""
 
     async def stream(self, prompt: str, **kwargs: object) -> AsyncIterator[str]:
-        # google-genai streaming via generate_content_stream.
+        # google-genai streaming via generate_content_stream. The returned
+        # iterator is *synchronous* and each next() makes a blocking network
+        # read — iterating it from the event loop would freeze the entire
+        # async runtime for the duration of the stream (coderabbit PR #5
+        # finding). Pump it through asyncio.to_thread one chunk at a time.
         response_stream = await asyncio.to_thread(
             self.client.models.generate_content_stream,
             model=self._model_name,
             contents=prompt,
         )
 
+        _sentinel = object()
+
+        def _next_chunk() -> object:
+            try:
+                return next(response_stream)
+            except StopIteration:
+                return _sentinel
+
         async def _gen() -> AsyncIterator[str]:
-            for chunk in response_stream:
-                if chunk.text:
-                    yield chunk.text
+            while True:
+                chunk = await asyncio.to_thread(_next_chunk)
+                if chunk is _sentinel:
+                    break
+                text = getattr(chunk, "text", None)
+                if text:
+                    yield text
 
         return _gen()
 

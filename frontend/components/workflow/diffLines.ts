@@ -11,11 +11,31 @@ export type DiffOp =
   | { type: "remove"; original: string; lineA: number }
   | { type: "add"; edited: string; lineB: number };
 
+// Guard the O(n*m) LCS table against pathological inputs. The synthesis
+// editor's payload is capped at ~256KB on the backend, so worst-case ~5000
+// lines × 5000 lines = 25M dp cells × 8 bytes ≈ 200MB — enough to freeze
+// the browser tab. Above this threshold we fall back to a coarse diff that
+// emits one bulk "remove all original" + one bulk "add all edited" op,
+// preserving the DiffOp output shape so callers don't change.
+// Coderabbit PR #5 finding.
+export const MAX_DP_CELLS = 1_000_000;
+
 export function diffLines(original: string, edited: string): DiffOp[] {
   const a = original.split("\n");
   const b = edited.split("\n");
   const n = a.length;
   const m = b.length;
+
+  if (n * m > MAX_DP_CELLS) {
+    // eslint-disable-next-line no-console
+    console.warn(
+      `diffLines: input exceeds ${MAX_DP_CELLS} dp cells (${n}×${m}); using coarse fallback.`,
+    );
+    const ops: DiffOp[] = [];
+    a.forEach((line, i) => ops.push({ type: "remove", original: line, lineA: i }));
+    b.forEach((line, i) => ops.push({ type: "add", edited: line, lineB: i }));
+    return ops;
+  }
 
   // Build the LCS length table. dp[i][j] = LCS length of a[0..i) and b[0..j).
   const dp: number[][] = Array.from({ length: n + 1 }, () => new Array(m + 1).fill(0));

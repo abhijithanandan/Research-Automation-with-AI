@@ -6,10 +6,14 @@ Pure ASCII source file - no Unicode in comments or strings.
 """
 
 import re
+from pathlib import Path
 from fpdf import FPDF
 
-MD_PATH  = "PHASE1_PROCEDURES.md"
-PDF_PATH = "PHASE1_PROCEDURES.pdf"
+# Anchor input/output paths to the script's directory so the helper works
+# regardless of which cwd the user runs it from (coderabbit PR #5 finding).
+_HERE = Path(__file__).resolve().parent
+MD_PATH  = str(_HERE / "PHASE1_PROCEDURES.md")
+PDF_PATH = str(_HERE / "PHASE1_PROCEDURES.pdf")
 
 # Colour palette (R, G, B)
 C_NAVY       = (15,  40,  90)

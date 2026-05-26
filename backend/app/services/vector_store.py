@@ -48,7 +48,11 @@ class ChromaVectorStore:
             import chromadb
 
             host, port = _parse_url(self.url)
-            self._client = chromadb.HttpClient(host=host, port=port)
+            # chromadb's HttpClient defaults to ssl=False; an https:// URL
+            # would silently fall back to plaintext (coderabbit PR #5 finding).
+            # Lift the scheme from the URL so https URLs actually use TLS.
+            use_ssl = self.url.lower().startswith("https://")
+            self._client = chromadb.HttpClient(host=host, port=port, ssl=use_ssl)
         return self._client
 
     async def upsert(self, namespace: str, documents: list[dict[str, object]]) -> None:

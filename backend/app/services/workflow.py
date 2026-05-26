@@ -227,27 +227,42 @@ async def _persist_artifacts(
 ) -> None:
     """Insert Critic-produced artifacts (matrix, summary) into the `artifacts` table.
 
-    Each artifact dict is the JSON dump of an `Artifact` schema. Idempotent on
-    re-runs: an artifact whose id already exists is skipped.
+    Atomic per artifact id via dialect-native ``ON CONFLICT DO NOTHING`` on
+    the primary key (coderabbit PR #5 finding). The previous get-then-add
+    pattern was non-atomic: under concurrent persists (a retry racing with
+    the original) it could raise IntegrityError. With ON CONFLICT the second
+    write is a no-op, matching the idempotency semantics of
+    :func:`_persist_candidates`.
     """
+    if not artifacts:
+        return
     now = datetime.now(tz=UTC)
-    for art in artifacts:
-        art_id = UUID(str(art["id"]))
-        existing = await session.get(ArtifactRow, art_id)
-        if existing is not None:
-            continue
-        session.add(
-            ArtifactRow(
-                id=art_id,
-                project_id=project_id,
-                kind=str(art["kind"]),
-                label=str(art["label"]),
-                content=str(art["content"]),
-                mime_type=str(art["mime_type"]),
-                produced_by=str(art["produced_by"]),
-                created_at=now,
-            )
+    rows = [
+        {
+            "id": UUID(str(art["id"])),
+            "project_id": project_id,
+            "kind": str(art["kind"]),
+            "label": str(art["label"]),
+            "content": str(art["content"]),
+            "mime_type": str(art["mime_type"]),
+            "produced_by": str(art["produced_by"]),
+            "created_at": now,
+        }
+        for art in artifacts
+    ]
+    dialect = session.bind.dialect.name if session.bind is not None else "postgresql"
+    if dialect == "postgresql":
+        from sqlalchemy.dialects.postgresql import insert as pg_insert
+
+        pg_stmt = pg_insert(ArtifactRow).values(rows).on_conflict_do_nothing(index_elements=["id"])
+        await session.execute(pg_stmt)
+    else:
+        from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+
+        sqlite_stmt = (
+            sqlite_insert(ArtifactRow).values(rows).on_conflict_do_nothing(index_elements=["id"])
         )
+        await session.execute(sqlite_stmt)
     _ = run_id  # reserved for future audit linkage
 
 
@@ -778,6 +793,17 @@ async def _resume_graph(
         # The graph ran to completion (no further gate).
         ws_state = "approved" if done_state == "approved" else "running"
         ws_phase = Phase.SYNTHESIS.value if done_state == "approved" else Phase.DISCOVERY.value
+        # Persist the terminal transition BEFORE emitting state.changed
+        # (coderabbit PR #5 finding). Previously the WS event told clients
+        # "approved" while workflow_runs.state stayed at "running" —
+        # downstream consumers reading the DB would see stale state.
+        async with get_session() as bg_session:
+            await _update_run_state(
+                bg_session,
+                run_id,
+                ws_state,
+                Phase(ws_phase),
+            )
         await _emit(
             project_id,
             {
@@ -806,7 +832,13 @@ async def _resume_graph(
         await _emit(
             project_id,
             {
+                # "system" is the catch-all agent id used by the WS contract
+                # when a failure cannot be attributed to a specific agent —
+                # at resume time we don't know whether discover or synthesize
+                # raised (coderabbit PR #5 finding: payload must include agent
+                # for the WS contract to stay consistent).
                 "type": "agent.error",
+                "agent": "system",
                 "run_id": str(run_id),
                 "error_code": error_code,
                 "error": str(exc),

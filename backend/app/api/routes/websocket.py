@@ -61,11 +61,16 @@ async def _check_handshake_rate_limit(remote_ip: str) -> bool:
         if len(window) >= _WS_RATE_MAX_PER_WINDOW:
             return False
         window.append(now)
-        # Opportunistic GC: if some other IP's deque is empty after expiry,
-        # drop it. Keeps the dict from growing unbounded on long uptimes.
+        # Opportunistic GC: drop buckets whose most-recent timestamp is older
+        # than the sliding-window cutoff. The previous version only dropped
+        # *empty* deques, so a deque with one timestamp from 3 days ago would
+        # leak forever (coderabbit PR #5 finding). Now we also evict deques
+        # whose freshest entry is outside the active window — those buckets
+        # are functionally dead and can be safely re-created on the next hit.
         if len(_ws_connect_timestamps) > 1024:
             for ip in list(_ws_connect_timestamps.keys()):
-                if not _ws_connect_timestamps[ip]:
+                bucket = _ws_connect_timestamps[ip]
+                if not bucket or bucket[-1] < cutoff:
                     del _ws_connect_timestamps[ip]
         return True
 
@@ -109,6 +114,13 @@ async def project_events(project_id: UUID, ws: WebSocket) -> None:
         await ws.close(code=4401, reason="auth error")
         return
 
+    # receive_json() returns whatever the client sent — could be an array,
+    # number, string, or null. .get() on those raises AttributeError and
+    # uncaughtly crashes the handler before the controlled close path runs
+    # (coderabbit PR #5 finding). Guard the type before any .get().
+    if not isinstance(first_msg, dict):
+        await ws.close(code=4401, reason="expected auth message")
+        return
     if first_msg.get("type") != "auth" or not first_msg.get("token"):
         await ws.close(code=4401, reason="expected auth message")
         return
@@ -172,7 +184,9 @@ async def project_events(project_id: UUID, ws: WebSocket) -> None:
             except (WebSocketDisconnect, ConnectionError, RuntimeError) as exc:
                 _log.info("ws_read_loop_exit", error_type=type(exc).__name__)
                 break
-            if msg.get("type") == "ping":
+            # Same isinstance guard as the auth frame — receive_json() can
+            # return a non-dict and msg.get() would AttributeError.
+            if isinstance(msg, dict) and msg.get("type") == "ping":
                 try:
                     await ws.send_json({"type": "pong"})
                 except (WebSocketDisconnect, ConnectionError, RuntimeError) as exc:

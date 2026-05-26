@@ -338,8 +338,23 @@ class CrossrefAdapter:
             ua += f"; mailto:{self._mailto}"
         return {"User-Agent": ua}
 
-    @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=1, max=8))
     async def search(self, query: str, max_results: int, client: httpx.AsyncClient) -> list[Paper]:
+        """Public entry — wraps the retried inner call, returns [] on exhaustion.
+
+        Mirrors the Semantic Scholar / arXiv / CORE / Europe PMC pattern so a
+        RetryError doesn't bubble up to the discovery router and kill the whole
+        run (coderabbit PR #5 finding).
+        """
+        try:
+            return await self._search_with_retry(query, max_results, client)
+        except RetryError:
+            _log.warning("crossref_retry_exhausted", query=query)
+            return []
+
+    @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=1, max=8))
+    async def _search_with_retry(
+        self, query: str, max_results: int, client: httpx.AsyncClient
+    ) -> list[Paper]:
         params: dict[str, str | int] = {
             "query": query,
             "rows": min(max_results, 100),
