@@ -3,9 +3,9 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import { ApprovalPanel, type OverridePayload } from "@/components/workflow/ApprovalPanel";
-import { Markdown } from "@/components/workflow/Markdown";
 import { PhaseTracker } from "@/components/workflow/PhaseTracker";
 import {
+  SynthesisReadOnly,
   SynthesisReview,
   type SynthesisOverridePayload,
 } from "@/components/workflow/SynthesisReview";
@@ -630,11 +630,12 @@ export default function HomePage() {
                     </ul>
                   )}
 
-                  {/* Phase 2: final synthesis read-only view */}
+                  {/* Phase 2: final synthesis read-only view — reuses the
+                      MatrixTable + narrative split from the HITL review so
+                      tables stay as real <table>s instead of being mushed
+                      into a single paragraph by raw-Markdown rendering. */}
                   {synthesisDone && summary && (
-                    <div className="rounded-lg border border-[#1e2d45] bg-[#0a0f1e] p-4">
-                      <Markdown content={summary.content} />
-                    </div>
+                    <SynthesisReadOnly matrix={matrix} summary={summary} papers={papers} />
                   )}
 
                   <AgentLog lines={logLines} endRef={logEndRef} />

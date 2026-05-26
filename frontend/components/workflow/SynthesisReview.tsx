@@ -51,19 +51,88 @@ function parseMatrix(content: string): MatrixModel | null {
   }
 }
 
-// Provider errors (Gemini, etc.) arrive as a huge JSON blob. Pull out the
-// short human-readable headline so the UI stays legible.
-function humanizeError(raw: string | null): string {
-  if (!raw) return "Extraction failed.";
-  // Gemini 429 quota errors.
+// Provider errors (Gemini, etc.) arrive as a huge JSON blob. Categorize the
+// known shapes so the UI can render a short, actionable message AND offer
+// the right recovery affordance (retry vs. wait vs. configure).
+type ErrorKind = "quota" | "overload" | "auth" | "schema" | "network" | "unknown";
+
+interface ClassifiedError {
+  kind: ErrorKind;
+  /** One-sentence human-readable headline. */
+  message: string;
+  /** Short action prompt — what the user should do next. */
+  hint: string;
+  /** True if a retry might succeed without user intervention. */
+  retryable: boolean;
+}
+
+function classifyError(raw: string | null): ClassifiedError {
+  if (!raw) {
+    return {
+      kind: "unknown",
+      message: "Extraction failed.",
+      hint: "Reject & regenerate to retry.",
+      retryable: true,
+    };
+  }
+  // Gemini 429 — hard quota exhaustion on the daily/minute budget.
   if (/RESOURCE_EXHAUSTED/.test(raw) || /\b429\b/.test(raw)) {
-    return "API rate limit reached (HTTP 429) — the LLM provider quota is exhausted. Retry later or upgrade the API plan.";
+    return {
+      kind: "quota",
+      message: "Gemini API quota exhausted (HTTP 429).",
+      hint: "The free-tier daily budget is spent. Wait for the quota reset (24h) or upgrade the API plan.",
+      retryable: false,
+    };
+  }
+  // Gemini 503 — transient model overload. Retrying in a minute usually works.
+  if (/UNAVAILABLE/.test(raw) || /\b503\b/.test(raw) || /experiencing high demand/i.test(raw)) {
+    return {
+      kind: "overload",
+      message: "Gemini model is temporarily overloaded (HTTP 503).",
+      hint: "This is transient. Wait 30–60 seconds, then click Reject & regenerate.",
+      retryable: true,
+    };
+  }
+  // 401/403 — bad or missing API key.
+  if (/\b401\b/.test(raw) || /\b403\b/.test(raw) || /UNAUTHENTICATED/.test(raw) || /PERMISSION_DENIED/.test(raw)) {
+    return {
+      kind: "auth",
+      message: "The LLM API key is invalid or missing the required permissions.",
+      hint: "Update GOOGLE_API_KEY in backend/.env and restart the backend.",
+      retryable: false,
+    };
+  }
+  // 400 + schema/validation errors — usually means the abstract was empty or unsafe.
+  if (/\b400\b/.test(raw) || /INVALID_ARGUMENT/.test(raw) || /SAFETY/i.test(raw)) {
+    return {
+      kind: "schema",
+      message: "The paper's abstract could not be processed by the model.",
+      hint: "The abstract may be empty, too long, or flagged by safety filters.",
+      retryable: false,
+    };
+  }
+  // Connection / DNS / timeout.
+  if (/ECONNRESET|ETIMEDOUT|getaddrinfo|connection|timeout/i.test(raw)) {
+    return {
+      kind: "network",
+      message: "Could not reach the Gemini API.",
+      hint: "Check the backend's network access and DNS, then regenerate.",
+      retryable: true,
+    };
   }
   // Try to lift the `'message': '...'` field out of a stringified error.
   const msg = /['"]message['"]\s*:\s*['"]([^'"]+)['"]/.exec(raw);
-  if (msg && msg[1]) return msg[1];
-  // Fall back to a hard truncation.
-  return raw.length > 160 ? `${raw.slice(0, 160)}…` : raw;
+  return {
+    kind: "unknown",
+    message: msg && msg[1] ? msg[1] : raw.length > 160 ? `${raw.slice(0, 160)}…` : raw,
+    hint: "Reject & regenerate to retry.",
+    retryable: true,
+  };
+}
+
+/** Legacy helper kept for the existing call site; new code uses classifyError. */
+function humanizeError(raw: string | null): string {
+  return classifyError(raw).message;
 }
 
 // ---------------------------------------------------------------------------
@@ -720,9 +789,11 @@ function MatrixTable({
         </p>
       )}
 
-      {/* Failed papers — listed compactly with one clean error each, not a JSON wall. */}
+      {/* Failed papers — one classified card per failure, with a kind tag,
+          a plain-English message, and an actionable hint. The previous
+          version dumped the raw Gemini JSON which was unreadable. */}
       {failedRows.length > 0 && (
-        <div className="rounded-lg border border-amber-500/20 bg-amber-500/5">
+        <div className="overflow-hidden rounded-lg border border-amber-500/20 bg-amber-500/5">
           <div className="border-b border-amber-500/15 px-4 py-2.5">
             <p className="text-xs font-semibold uppercase tracking-wider text-amber-400">
               {failedRows.length} paper{failedRows.length !== 1 ? "s" : ""} could not be extracted
@@ -730,19 +801,152 @@ function MatrixTable({
           </div>
           <ul className="divide-y divide-amber-500/10">
             {failedRows.map((row, i) => (
-              <li key={row.citation_key || i} className="space-y-1.5 px-4 py-3">
-                <PaperIdentity
-                  citationKey={row.citation_key}
-                  paper={paperByKey.get(row.citation_key)}
-                  accent="amber"
-                />
-                <p className="text-xs leading-relaxed text-slate-400">
-                  {humanizeError(row.error)}
-                </p>
-              </li>
+              <FailedPaperCard
+                key={row.citation_key || i}
+                citationKey={row.citation_key}
+                paper={paperByKey.get(row.citation_key)}
+                error={row.error}
+              />
             ))}
           </ul>
         </div>
+      )}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// FailedPaperCard — categorized error display per failed extraction
+// ---------------------------------------------------------------------------
+
+const ERROR_KIND_STYLES: Record<
+  ErrorKind,
+  { tag: string; label: string; dot: string }
+> = {
+  quota: {
+    tag: "border-red-500/30 bg-red-500/10 text-red-300",
+    label: "Quota exhausted",
+    dot: "bg-red-400",
+  },
+  overload: {
+    tag: "border-amber-500/30 bg-amber-500/10 text-amber-300",
+    label: "Model overloaded",
+    dot: "bg-amber-400",
+  },
+  auth: {
+    tag: "border-red-500/30 bg-red-500/10 text-red-300",
+    label: "Auth failure",
+    dot: "bg-red-400",
+  },
+  schema: {
+    tag: "border-slate-500/30 bg-slate-500/10 text-slate-300",
+    label: "Input rejected",
+    dot: "bg-slate-400",
+  },
+  network: {
+    tag: "border-blue-500/30 bg-blue-500/10 text-blue-300",
+    label: "Network error",
+    dot: "bg-blue-400",
+  },
+  unknown: {
+    tag: "border-slate-500/30 bg-slate-500/10 text-slate-300",
+    label: "Unknown error",
+    dot: "bg-slate-400",
+  },
+};
+
+function FailedPaperCard({
+  citationKey,
+  paper,
+  error,
+}: {
+  citationKey: string;
+  paper: Paper | undefined;
+  error: string | null;
+}) {
+  const classified = classifyError(error);
+  const styles = ERROR_KIND_STYLES[classified.kind];
+  return (
+    <li className="px-4 py-3.5">
+      <div className="flex items-start justify-between gap-3">
+        <PaperIdentity citationKey={citationKey} paper={paper} accent="amber" />
+        <span
+          className={cn(
+            "inline-flex shrink-0 items-center gap-1.5 rounded-full border px-2.5 py-0.5 text-[10px] font-semibold uppercase tracking-wider",
+            styles.tag,
+          )}
+        >
+          <span className={cn("h-1.5 w-1.5 rounded-full", styles.dot)} />
+          {styles.label}
+        </span>
+      </div>
+      <div className="mt-2 space-y-1">
+        <p className="text-xs leading-relaxed text-slate-300">{classified.message}</p>
+        <p className="text-[11px] leading-relaxed text-slate-500">{classified.hint}</p>
+      </div>
+    </li>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// SynthesisReadOnly — same structured view (matrix + narrative) used by the
+// approval gate, but without the approve/reject/edit panel. Used on the
+// "done" screen after the user has approved Phase 2 so the final synthesis
+// is rendered as a real table + prose, not a raw markdown dump.
+// ---------------------------------------------------------------------------
+
+export function SynthesisReadOnly({
+  matrix,
+  summary,
+  papers,
+}: {
+  matrix: Artifact | null;
+  summary: Artifact | null;
+  papers: Paper[];
+}) {
+  const parsedMatrix = useMemo(
+    () => (matrix ? parseMatrix(matrix.content) : null),
+    [matrix],
+  );
+  const paperByKey = useMemo(() => {
+    const map = new Map<string, Paper>();
+    for (const p of papers) map.set(p.citation_key, p);
+    return map;
+  }, [papers]);
+
+  const summaryContent = summary?.content ?? "";
+  const synthesisIdx = summaryContent.search(/##\s*Synthesis\b/i);
+  const narrative =
+    synthesisIdx >= 0 ? summaryContent.slice(synthesisIdx) : summaryContent;
+
+  if (!matrix && !summary) {
+    return (
+      <p className="rounded-lg border border-[#1e2d45] bg-[#0a0f1e] px-4 py-6 text-center text-sm text-slate-500">
+        No synthesis artifacts to display.
+      </p>
+    );
+  }
+
+  return (
+    <div className="space-y-5">
+      {parsedMatrix && parsedMatrix.rows.length > 0 && (
+        <section>
+          <h3 className="mb-2 text-xs font-semibold uppercase tracking-wider text-slate-400">
+            Comparison matrix
+          </h3>
+          <MatrixTable rows={parsedMatrix.rows} paperByKey={paperByKey} />
+        </section>
+      )}
+
+      {narrative.trim() && (
+        <section>
+          <h3 className="mb-2 text-xs font-semibold uppercase tracking-wider text-slate-400">
+            Narrative
+          </h3>
+          <div className="rounded-lg border border-[#1e2d45] bg-[#0a0f1e] px-4 py-4">
+            <Markdown content={narrative} />
+          </div>
+        </section>
       )}
     </div>
   );
