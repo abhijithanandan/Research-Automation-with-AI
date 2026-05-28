@@ -234,3 +234,18 @@ async def test_critic_matrix_validates_against_schema() -> None:
     matrix_data = json.loads(out.matrix.content)
     # Raises jsonschema.ValidationError if the matrix shape drifts from the schema.
     jsonschema.validate(instance=matrix_data, schema=schema)
+
+
+@pytest.mark.asyncio
+async def test_empty_pool_error_output_has_distinct_artifacts() -> None:
+    """PR #5 finding: when the Critic is handed an empty pool it returns an
+    error CriticOutput. matrix and summary must be *distinct* Artifact rows —
+    if they share an id, _persist_artifacts (ON CONFLICT DO NOTHING on the
+    primary key) silently drops one on persist."""
+    critic = Critic(llm=_FakeLLM(), vector_store=_FakeVectorStore())
+    out = await critic.run(CriticInput(approved_papers=[]))
+
+    assert out.matrix.id != out.summary.id
+    assert out.matrix.label != out.summary.label
+    # Both still carry the same human-readable error content.
+    assert out.matrix.content == out.summary.content

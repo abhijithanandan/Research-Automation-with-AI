@@ -44,7 +44,7 @@ _ws_event_bus: dict[UUID, set[asyncio.Queue[dict[str, object]]]] = {}
 # Last significant event per project — replayed to late WS subscribers so
 # they catch approval.required / state.changed even if they connected after
 # the event fired (race condition between workflow/start and WS connect).
-_REPLAY_TYPES = {"approval.required", "state.changed", "agent.error"}
+_REPLAY_TYPES = {"approval.required", "state.changed", "agent.error", "cost.cap_exceeded"}
 _last_event: dict[UUID, dict[str, object]] = {}
 
 
@@ -145,6 +145,92 @@ async def _write_audit(
         created_at=datetime.now(tz=UTC),
     )
     session.add(entry)
+
+
+# ---------------------------------------------------------------------------
+# Cost cap enforcement (BRD NFR-5)
+# ---------------------------------------------------------------------------
+
+
+async def _enforce_cost_cap(
+    session: AsyncSession,
+    project_id: UUID,
+    run_id: UUID,
+) -> bool:
+    """Roll up the project's spend and enforce the per-project cost cap.
+
+    Sums ``audit_log.cost_usd`` for the project and compares it against
+    ``projects.token_cap_usd``. Behaviour (BRD NFR-5):
+
+      * spend >= cap            → emit ``cost.cap_exceeded``, write a
+        ``cost.cap_exceeded`` audit row, and return ``True`` so the caller
+        stops the workflow instead of spending further.
+      * spend >= warn_pct * cap → emit ``cost.cap_warn`` once we cross the
+        threshold (best-effort; the client shows a banner) and return
+        ``False`` (workflow continues).
+      * otherwise               → return ``False``.
+
+    The check runs in the same background session that just wrote the
+    agent's usage row, so the rollup includes the call that may have pushed
+    us over. Returns a bool rather than raising because the callers are
+    background gate handlers, not request paths — they translate the signal
+    into a state transition + WS event.
+    """
+    from sqlalchemy import func
+
+    from app.config import get_settings
+
+    project = await session.get(ProjectRow, project_id)
+    if project is None:
+        return False
+    cap = float(project.token_cap_usd or 0.0)
+    if cap <= 0.0:
+        # A non-positive cap means "uncapped" — never enforce.
+        return False
+
+    spend = (
+        await session.execute(
+            select(func.coalesce(func.sum(AuditLogRow.cost_usd), 0.0)).where(
+                AuditLogRow.project_id == project_id
+            )
+        )
+    ).scalar_one()
+    spend = float(spend or 0.0)
+
+    warn_pct = get_settings().token_cap_warn_pct
+
+    if spend >= cap:
+        await _write_audit(
+            session,
+            project_id=project_id,
+            workflow_run_id=run_id,
+            actor="system",
+            action="cost.cap_exceeded",
+            payload={"spend_usd": spend, "cap_usd": cap},
+        )
+        await _emit(
+            project_id,
+            {
+                "type": "cost.cap_exceeded",
+                "run_id": str(run_id),
+                "spend_usd": spend,
+                "cap_usd": cap,
+            },
+        )
+        return True
+
+    if spend >= warn_pct * cap:
+        await _emit(
+            project_id,
+            {
+                "type": "cost.cap_warn",
+                "run_id": str(run_id),
+                "spend_usd": spend,
+                "cap_usd": cap,
+                "warn_pct": warn_pct,
+            },
+        )
+    return False
 
 
 # ---------------------------------------------------------------------------
@@ -804,9 +890,20 @@ async def _resume_graph(
             # Phase 1 re-pause, so Phase.DISCOVERY is correct by construction.
             # (snapshot.next[0] is a *node name* like NODE_AWAIT_POOL_APPROVAL,
             # not a phase enum — see graph/workflow.py.)
-            # DB state is already updated to awaiting_approval by the caller;
-            # just re-emit the correct phase-1 approval.required event.
+            #
+            # PR #5 fix: persist the freshly-discovered candidates before
+            # re-arming the gate. On a reject-with-feedback the graph re-runs
+            # `discover` and produces a *new* candidate set in the checkpoint;
+            # the frontend reads the pool from GET /papers (the DB table), so
+            # without this upsert the refined results never become visible and
+            # the reject→refine cycle silently does nothing. Mirrors the
+            # persist-then-await-gate sequence in _run_graph. ON CONFLICT DO
+            # NOTHING keeps it idempotent for candidates that survived the
+            # refinement.
+            candidates_raw: list[dict[str, Any]] = snapshot.values.get("candidates", [])
+            candidate_papers = [Paper(**d) for d in candidates_raw]
             async with get_session() as bg_session:
+                await _persist_candidates(bg_session, project_id, run_id, candidate_papers)
                 await _update_run_state(bg_session, run_id, "awaiting_approval")
             await _emit(
                 project_id,
@@ -889,6 +986,7 @@ async def _handle_gate_pause(
     # Token/cost rollup the Critic accumulated across its LLM calls.
     usage: dict[str, Any] = values.get("synthesis_usage") or {}
 
+    capped = False
     async with get_session() as bg_session:
         if artifacts:
             await _persist_artifacts(bg_session, project_id, run_id, artifacts)
@@ -919,6 +1017,12 @@ async def _handle_gate_pause(
                 tokens_out=usage.get("tokens_out"),
                 cost_usd=usage.get("cost_usd"),
             )
+        # Enforce the per-project cost cap (NFR-5). If we're over budget, halt
+        # here rather than re-arming the gate — the synthesis the user is about
+        # to review is the last work we'll do until they raise the cap.
+        capped = await _enforce_cost_cap(bg_session, project_id, run_id)
+        if capped:
+            await _update_run_state(bg_session, run_id, "error")
 
     artifact_ids = [str(a["id"]) for a in artifacts if a.get("id")]
     await _emit(
@@ -930,6 +1034,10 @@ async def _handle_gate_pause(
             "artifact_ids": artifact_ids,
         },
     )
+    if capped:
+        # _enforce_cost_cap already emitted cost.cap_exceeded; don't ask the
+        # user to approve a phase whose run we just moved to "error".
+        return
     await _emit(
         project_id,
         {

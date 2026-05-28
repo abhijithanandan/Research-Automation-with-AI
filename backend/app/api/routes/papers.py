@@ -212,6 +212,7 @@ def _row_to_schema(row: PaperRow) -> Paper:
         abstract=row.abstract,
         pdf_url=row.pdf_url,  # type: ignore[arg-type]
         citation_key=row.citation_key,
+        citation_count=row.citation_count,
         approved=row.approved,
         added_at=row.added_at,
     )

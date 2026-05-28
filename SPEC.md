@@ -320,6 +320,8 @@ All messages are JSON. Every event has a `type` and `ts` (ISO-8601). Client-boun
 | `agent.error` | `{ agent, run_id, error }` | Agent failed (recoverable). |
 | `approval.required` | `{ phase, run_id, summary }` | Engine has paused awaiting human input. |
 | `usage.tick` | `{ tokens_in, tokens_out, cost_usd }` | Periodic usage rollup (≤ every 5s). |
+| `cost.cap_warn` | `{ run_id, spend_usd, cap_usd, warn_pct }` | Project spend crossed `token_cap_warn_pct` of the cap (NFR-5). Advisory — the run continues. |
+| `cost.cap_exceeded` | `{ run_id, spend_usd, cap_usd }` | Project spend reached `token_cap_usd` (NFR-5). The run is moved to `error`; the user must raise the cap to continue. |
 
 ### 4.2 Client → Server events
 

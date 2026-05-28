@@ -207,3 +207,60 @@ async def test_run_graph_persists_papers() -> None:
     # _run_graph reconstructs them via Paper(**d). Verify at least one paper was passed.
     assert len(call_args.args[3]) >= 1
     assert call_args.args[3][0].citation_key == "integrate2024"
+
+
+@pytest.mark.asyncio
+async def test_resume_graph_persists_refined_candidates_on_reject_repause() -> None:
+    """PR #5 regression: when the graph re-pauses at the Phase-1 pool gate after
+    a reject-with-feedback (the discover node re-ran and produced a *new*
+    candidate set), _resume_graph must persist those refined candidates to the
+    papers table — otherwise GET /papers returns the stale pre-reject list and
+    the reject->refine cycle is invisible to the user.
+    """
+    refined = [
+        _mock_paper("refined2025a", project_id=TEST_PROJECT_ID).model_dump(),
+        _mock_paper("refined2025b", project_id=TEST_PROJECT_ID).model_dump(),
+    ]
+
+    # Mock graph whose post-resume snapshot reports a Phase-1 re-pause: snapshot
+    # .next is non-empty and is NOT the synthesis/section gate node, so the
+    # _resume_graph branch logic classifies it as a discovery re-pause.
+    mock_graph = MagicMock()
+    mock_graph.ainvoke = AsyncMock(return_value=None)
+    snapshot = MagicMock()
+    snapshot.next = ("await_pool_approval",)
+    snapshot.values = {"candidates": refined}
+    mock_graph.aget_state = AsyncMock(return_value=snapshot)
+
+    run_id = uuid4()
+    config = {"configurable": {"thread_id": str(run_id)}}
+
+    from langgraph.types import Command
+
+    with patch("app.services.workflow._persist_candidates", new_callable=AsyncMock) as mock_persist:
+        with patch("app.db.session.get_session") as mock_get_session:
+            mock_session = AsyncMock(spec=AsyncSession)
+            mock_ctx = MagicMock()
+            mock_ctx.__aenter__ = AsyncMock(return_value=mock_session)
+            mock_ctx.__aexit__ = AsyncMock(return_value=False)
+            mock_get_session.return_value = mock_ctx
+
+            with patch("app.services.workflow._emit", new_callable=AsyncMock):
+                with patch("app.services.workflow._update_run_state", new_callable=AsyncMock):
+                    from app.services.workflow import _resume_graph
+
+                    await _resume_graph(
+                        TEST_PROJECT_ID,
+                        run_id,
+                        mock_graph,
+                        config,
+                        Command(resume="reject", update={"last_feedback": "narrow it"}),
+                        "running",
+                    )
+
+    mock_persist.assert_called_once()
+    call_args = mock_persist.call_args
+    assert call_args.args[1] == TEST_PROJECT_ID
+    assert call_args.args[2] == run_id
+    persisted_keys = {p.citation_key for p in call_args.args[3]}
+    assert persisted_keys == {"refined2025a", "refined2025b"}

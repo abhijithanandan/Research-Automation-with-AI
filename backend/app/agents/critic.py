@@ -346,16 +346,25 @@ class Critic(Agent[CriticInput, CriticOutput]):
 
     @staticmethod
     def _error_output(message: str) -> CriticOutput:
+        # matrix and summary must be *distinct* Artifact rows: _persist_artifacts
+        # de-dupes on the primary key with ON CONFLICT DO NOTHING, so reusing one
+        # Artifact (same id) for both slots would silently drop one of them on
+        # persist (PR #5 finding). Build two rows with their own ids.
         now = datetime.now(tz=UTC)
         pid = uuid4()
-        err = Artifact(
-            id=uuid4(),
-            project_id=pid,
-            kind="log",
-            label="critic-error",
-            content=message,
-            mime_type="text/plain",
-            produced_by="critic",
-            created_at=now,
+
+        def _err(label: str) -> Artifact:
+            return Artifact(
+                id=uuid4(),
+                project_id=pid,
+                kind="log",
+                label=label,
+                content=message,
+                mime_type="text/plain",
+                produced_by="critic",
+                created_at=now,
+            )
+
+        return CriticOutput(
+            matrix=_err("critic-error-matrix"), summary=_err("critic-error-summary")
         )
-        return CriticOutput(matrix=err, summary=err)

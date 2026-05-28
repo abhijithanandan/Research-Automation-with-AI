@@ -12,6 +12,25 @@ export type ServerEvent =
   | { type: "agent.error"; ts: string; agent: string; run_id: string; error: string }
   | { type: "approval.required"; ts: string; phase: Phase; run_id: string; summary: string }
   | { type: "usage.tick"; ts: string; tokens_in: number; tokens_out: number; cost_usd: number }
+  | {
+      // Emitted when project spend crosses token_cap_warn_pct of the cap
+      // (NFR-5). Advisory — the workflow keeps running.
+      type: "cost.cap_warn";
+      ts: string;
+      run_id: string;
+      spend_usd: number;
+      cap_usd: number;
+      warn_pct: number;
+    }
+  | {
+      // Emitted when project spend reaches the cap (NFR-5). The run is moved
+      // to "error"; the user must raise the cap to continue.
+      type: "cost.cap_exceeded";
+      ts: string;
+      run_id: string;
+      spend_usd: number;
+      cap_usd: number;
+    }
   | { type: "pong"; ts: string };
 
 export interface WSOptions {

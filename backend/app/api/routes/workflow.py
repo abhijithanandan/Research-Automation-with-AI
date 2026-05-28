@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any, Literal
+from typing import Literal
 from uuid import UUID
 
 from fastapi import APIRouter, HTTPException, status
@@ -127,25 +127,14 @@ async def override(
     )
 
 
-@router.get("/candidates", response_model=list[dict[str, Any]])
-async def list_candidates(
-    project_id: UUID, user: CurrentUser, db: DbSession
-) -> list[dict[str, Any]]:
-    """Read candidate papers from the LangGraph checkpoint state.
-
-    This avoids needing a separate DB persistence step — the graph state
-    is the source of truth while the workflow is awaiting approval.
-    """
-    await _assert_project_owned(db, project_id, user.id)
-    run = await wf_svc.get_active_run(db, project_id)
-    if run is None:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "No active workflow run")
-
-    graph = wf_svc.get_compiled_graph()
-    config = {"configurable": {"thread_id": str(run.id)}}
-    snapshot = await graph.aget_state(config)
-    candidates: list[dict[str, Any]] = snapshot.values.get("candidates", [])
-    return candidates
+# NOTE: there is deliberately no GET /workflow/candidates endpoint.
+# The candidate/approved pool has a single source of truth — the `papers`
+# DB table, read via GET /projects/{id}/papers (SPEC §3.4) and toggled via
+# PATCH /papers/{id}. An earlier GET /workflow/candidates read the LangGraph
+# checkpoint directly, which could diverge from the DB (PR #5 finding: the
+# checkpoint and the papers table are two sources of truth). _run_graph and
+# the Phase-1 re-pause branch of _resume_graph both persist candidates into
+# the papers table at every pool gate, so the DB is always authoritative.
 
 
 # ---------------------------------------------------------------------------

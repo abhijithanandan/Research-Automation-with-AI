@@ -216,24 +216,32 @@ async def test_resume_graph_emits_synthesis_approval_required() -> None:
     with patch("app.services.workflow._emit", side_effect=capture_emit):
         with patch("app.services.workflow._update_run_state", side_effect=capture_state):
             with patch("app.services.workflow._persist_artifacts", new_callable=AsyncMock):
-                with patch("app.db.session.get_session") as mock_get_session:
-                    mock_session = AsyncMock()
-                    # `session.add` is synchronous — keep it a plain MagicMock so
-                    # _write_audit does not leave an un-awaited coroutine.
-                    mock_session.add = MagicMock()
-                    mock_ctx = MagicMock()
-                    mock_ctx.__aenter__ = AsyncMock(return_value=mock_session)
-                    mock_ctx.__aexit__ = AsyncMock(return_value=False)
-                    mock_get_session.return_value = mock_ctx
+                # The cost cap (NFR-5) is exercised in test_cost_cap.py; here the
+                # DB session is fully mocked so the rollup query can't run. Stub
+                # it to "not capped" so this test stays focused on gate emission.
+                with patch(
+                    "app.services.workflow._enforce_cost_cap",
+                    new_callable=AsyncMock,
+                    return_value=False,
+                ):
+                    with patch("app.db.session.get_session") as mock_get_session:
+                        mock_session = AsyncMock()
+                        # `session.add` is synchronous — keep it a plain MagicMock so
+                        # _write_audit does not leave an un-awaited coroutine.
+                        mock_session.add = MagicMock()
+                        mock_ctx = MagicMock()
+                        mock_ctx.__aenter__ = AsyncMock(return_value=mock_session)
+                        mock_ctx.__aexit__ = AsyncMock(return_value=False)
+                        mock_get_session.return_value = mock_ctx
 
-                    await _resume_graph(
-                        TEST_PROJECT_ID,
-                        run_id,
-                        graph,
-                        {"configurable": {"thread_id": str(run_id)}},
-                        Command(resume="approve"),
-                        "approved",
-                    )
+                        await _resume_graph(
+                            TEST_PROJECT_ID,
+                            run_id,
+                            graph,
+                            {"configurable": {"thread_id": str(run_id)}},
+                            Command(resume="approve"),
+                            "approved",
+                        )
 
     emitted_types = [e.get("type") for e in emitted]
     assert "approval.required" in emitted_types
