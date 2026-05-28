@@ -24,7 +24,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.session import flush_for_background_dispatch
 from app.graph.state import GraphState
-from app.graph.workflow import NODE_AWAIT_SYNTHESIS, build_graph
+from app.graph.workflow import NODE_AWAIT_SECTION, NODE_AWAIT_SYNTHESIS, build_graph
 from app.models.db import ArtifactRow, AuditLogRow, PaperRow, ProjectRow, WorkflowRunRow
 from app.models.schemas import Paper, Phase, WorkflowRun
 from app.utils.logging import get_logger
@@ -610,45 +610,64 @@ async def approve_workflow(
     """
     run = await _assert_awaiting(session, run_id)
 
-    # Build the approved pool from DB — these are the papers the user toggled
-    # via PATCH /papers/{id} before calling approve.
-    approved_rows = (
-        (
-            await session.execute(
-                select(PaperRow).where(
-                    PaperRow.project_id == project_id,
-                    PaperRow.approved.is_(True),
+    # Build the per-phase resume payload + audit shape.
+    resume_update: dict[str, Any] = {}
+    phase_specific_audit: dict[str, Any] | None = None
+
+    if run.phase == Phase.DISCOVERY.value:
+        # Phase 1: hydrate approved_pool from DB-toggled papers.
+        approved_rows = (
+            (
+                await session.execute(
+                    select(PaperRow).where(
+                        PaperRow.project_id == project_id,
+                        PaperRow.approved.is_(True),
+                    )
                 )
             )
+            .scalars()
+            .all()
         )
-        .scalars()
-        .all()
-    )
-
-    approved_pool = [
-        {
-            "id": str(r.id),
-            "project_id": str(r.project_id),
-            "source": r.source,
-            "external_id": r.external_id,
-            "title": r.title,
-            "authors": list(r.authors),
-            "year": r.year,
-            "abstract": r.abstract,
-            "pdf_url": r.pdf_url,
-            "citation_key": r.citation_key,
-            "citation_count": r.citation_count,
-            "approved": True,
-            "added_at": r.added_at.isoformat(),
+        approved_pool = [
+            {
+                "id": str(r.id),
+                "project_id": str(r.project_id),
+                "source": r.source,
+                "external_id": r.external_id,
+                "title": r.title,
+                "authors": list(r.authors),
+                "year": r.year,
+                "abstract": r.abstract,
+                "pdf_url": r.pdf_url,
+                "citation_key": r.citation_key,
+                "citation_count": r.citation_count,
+                "approved": True,
+                "added_at": r.added_at.isoformat(),
+            }
+            for r in approved_rows
+        ]
+        citation_keys = [r.citation_key for r in approved_rows]
+        resume_update["approved_pool"] = approved_pool
+        phase_specific_audit = {
+            "action": "phase_1.approved_pool",
+            "payload": {"citation_keys": citation_keys, "count": len(citation_keys)},
         }
-        for r in approved_rows
-    ]
-    citation_keys = [r.citation_key for r in approved_rows]
 
-    # Approving a gate transitions the workflow into the next phase. From
-    # discovery → synthesis; from synthesis → drafting; etc. Persist the
-    # phase change so the paper-lock rule and UI status see consistent state.
-    next_phase = _NEXT_PHASE_AFTER_GATE.get(run.phase)
+    # Phase change rule:
+    #   - Discovery approve → SYNTHESIS (one approval).
+    #   - Synthesis approve → DRAFTING (one approval).
+    #   - Drafting approve  → stays DRAFTING until the last section, then DONE.
+    #     The "is last section" check happens inside the graph (node_assemble
+    #     emits state.changed{phase:"done"} via the resume terminal branch).
+    #     Here we simply *do not* advance the run.phase column — the next
+    #     section gate will set it back to awaiting_approval/drafting via
+    #     _handle_section_gate_pause; the manuscript-assembled branch sets
+    #     it to DONE.
+    if run.phase == Phase.DRAFTING.value:
+        next_phase = None  # keep DRAFTING; advance to DONE happens in resume
+    else:
+        next_phase = _NEXT_PHASE_AFTER_GATE.get(run.phase)
+
     await _update_run_state(session, run_id, "approved", new_phase=next_phase)
     await _write_audit(
         session,
@@ -656,16 +675,40 @@ async def approve_workflow(
         workflow_run_id=run_id,
         actor="user",
         action="user.approve",
-        payload={"user_id": str(user_id), "feedback": feedback},
+        payload={
+            "user_id": str(user_id),
+            "feedback": feedback,
+            "phase": run.phase,
+        },
     )
-    await _write_audit(
-        session,
-        project_id=project_id,
-        workflow_run_id=run_id,
-        actor="system",
-        action="phase_1.approved_pool",
-        payload={"citation_keys": citation_keys, "count": len(citation_keys)},
-    )
+    if phase_specific_audit is not None:
+        # The phase_1.approved_pool audit row is the canonical proof that
+        # the pool was approved (audit-marker layer in
+        # _assert_phase_not_locked). Alembic 0006 enforces uniqueness per
+        # workflow_run_id; if a second concurrent approve races through
+        # _assert_awaiting and lands here, the partial unique index will
+        # raise IntegrityError on flush. Translate that to a clear 409 so
+        # callers don't get a 500.
+        await _write_audit(
+            session,
+            project_id=project_id,
+            workflow_run_id=run_id,
+            actor="system",
+            action=phase_specific_audit["action"],
+            payload=phase_specific_audit["payload"],
+        )
+        try:
+            await session.flush()
+        except IntegrityError as exc:
+            await session.rollback()
+            _log.info("workflow_double_approve_blocked", run_id=str(run_id))
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail={
+                    "code": "already_approved",
+                    "message": "This pool has already been approved.",
+                },
+            ) from exc
     # Make state visible to the background resume task. Named helper per the
     # audit-round-3 commit-ownership contract (see app/db/session.py).
     await flush_for_background_dispatch(session)
@@ -679,7 +722,7 @@ async def approve_workflow(
             run_id,
             graph,
             config,
-            Command(resume="approve", update={"approved_pool": approved_pool}),
+            Command(resume="approve", update=resume_update),
             "approved",
         )
     )
@@ -751,9 +794,15 @@ async def override_workflow(
         "created_at": now.isoformat(),
     }
 
-    # An override advances the gate just like an approve — bump the persisted
-    # phase to the next phase in the state machine (MED-1 reviewer finding).
-    next_phase = _NEXT_PHASE_AFTER_GATE.get(run.phase)
+    # An override advances the gate just like an approve. For Phase 4 the
+    # phase column stays at DRAFTING (a section override doesn't necessarily
+    # mean the manuscript is done — there may still be sections left). The
+    # transition to DONE is handled by the resume terminal branch when the
+    # graph reaches node_assemble.
+    if run.phase == Phase.DRAFTING.value:
+        next_phase = None
+    else:
+        next_phase = _NEXT_PHASE_AFTER_GATE.get(run.phase)
     await _update_run_state(session, run_id, "approved", new_phase=next_phase)
     # Flush for background resume — named helper per the commit-ownership contract.
     await flush_for_background_dispatch(session)
@@ -838,20 +887,52 @@ async def get_active_run(session: AsyncSession, project_id: UUID) -> WorkflowRun
 # ---------------------------------------------------------------------------
 
 
-async def _assert_awaiting(session: AsyncSession, run_id: UUID) -> WorkflowRunRow:
-    """Raise HTTP 409 if the run is not in awaiting_approval state (SPEC §7 rule 2)."""
+async def _assert_run_in_state(
+    session: AsyncSession,
+    run_id: UUID,
+    expected_states: set[str],
+) -> WorkflowRunRow:
+    """Generalized run-state guard (M2-D).
+
+    Raises:
+        HTTPException 404: the run does not exist.
+        HTTPException 409: the run exists but is in a state not in
+            ``expected_states``. The error envelope carries
+            ``code='phase_locked'`` so the frontend ``ApiError`` classifier
+            categorizes it as a conflict (which it is — the workflow has
+            moved past or before the point the caller expected).
+
+    The previous ``_assert_awaiting`` helper hard-coded a single allowed
+    state. Generalizing to a set lets future callers express richer
+    contracts (e.g. ``{"running", "awaiting_approval"}`` for reads that
+    are safe in either state) without each handler reimplementing the
+    HTTPException shape.
+    """
     run = await session.get(WorkflowRunRow, run_id)
     if run is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, f"WorkflowRun {run_id} not found")
-    if run.state != "awaiting_approval":
+    if run.state not in expected_states:
         raise HTTPException(
             status.HTTP_409_CONFLICT,
             detail={
                 "code": "phase_locked",
-                "message": f"WorkflowRun is in state '{run.state}', not 'awaiting_approval'.",
+                "message": (
+                    f"WorkflowRun is in state '{run.state}'; expected one of "
+                    f"{sorted(expected_states)}."
+                ),
             },
         )
     return run
+
+
+async def _assert_awaiting(session: AsyncSession, run_id: UUID) -> WorkflowRunRow:
+    """Raise HTTP 409 if the run is not in awaiting_approval state (SPEC §7 rule 2).
+
+    Thin wrapper around :func:`_assert_run_in_state` for the most common
+    case. Kept as its own named function because every Phase 1/2/4 gate
+    handler uses it — the call sites read better with the descriptive name.
+    """
+    return await _assert_run_in_state(session, run_id, {"awaiting_approval"})
 
 
 async def _resume_graph(
@@ -883,11 +964,16 @@ async def _resume_graph(
             await _handle_gate_pause(project_id, run_id, snapshot, get_session)
             return
 
+        if snapshot.next and snapshot.next[0] == NODE_AWAIT_SECTION:
+            # Graph paused at a Phase 4 per-section gate.
+            await _handle_section_gate_pause(project_id, run_id, snapshot, get_session)
+            return
+
         if snapshot.next:
             # Graph paused at a Phase 1 gate again (e.g. after a reject re-runs
-            # discover). The Phase 2 synthesis gate is handled by the branch
-            # above (line ~771); anything reaching here is — by exclusion — a
-            # Phase 1 re-pause, so Phase.DISCOVERY is correct by construction.
+            # discover). Phase 2 and Phase 4 gates are handled by the branches
+            # above; anything reaching here is — by exclusion — a Phase 1
+            # re-pause, so Phase.DISCOVERY is correct by construction.
             # (snapshot.next[0] is a *node name* like NODE_AWAIT_POOL_APPROVAL,
             # not a phase enum — see graph/workflow.py.)
             #
@@ -916,7 +1002,44 @@ async def _resume_graph(
             )
             return
 
-        # The graph ran to completion (no further gate).
+        # The graph ran to completion (no further gate). With Phase 4 wired,
+        # a populated `manuscript` in state means we reached node_assemble
+        # and the project is done — persist the manuscript artifact and
+        # emit phase="done". Otherwise this is the Phase-1/2 terminal path
+        # which we keep for backward compat.
+        manuscript = snapshot.values.get("manuscript")
+        if manuscript:
+            async with get_session() as bg_session:
+                await _persist_artifacts(bg_session, project_id, run_id, [manuscript])
+                await _update_run_state(bg_session, run_id, "approved", Phase.DONE)
+                await _write_audit(
+                    bg_session,
+                    project_id=project_id,
+                    workflow_run_id=run_id,
+                    actor="system",
+                    action="phase_4.manuscript_assembled",
+                    payload={"manuscript_id": str(manuscript.get("id"))},
+                )
+            await _emit(
+                project_id,
+                {
+                    "type": "agent.completed",
+                    "agent": "scribe",
+                    "run_id": str(run_id),
+                    "artifact_ids": [str(manuscript.get("id"))],
+                },
+            )
+            await _emit(
+                project_id,
+                {
+                    "type": "state.changed",
+                    "phase": Phase.DONE.value,
+                    "state": "approved",
+                    "run_id": str(run_id),
+                },
+            )
+            return
+
         ws_state = "approved" if done_state == "approved" else "running"
         ws_phase = Phase.SYNTHESIS.value if done_state == "approved" else Phase.DISCOVERY.value
         # Persist the terminal transition BEFORE emitting state.changed
@@ -1045,6 +1168,96 @@ async def _handle_gate_pause(
             "phase": Phase.SYNTHESIS.value,
             "run_id": str(run_id),
             "summary": "The literature synthesis is ready for your review.",
+        },
+    )
+
+
+async def _handle_section_gate_pause(
+    project_id: UUID,
+    run_id: UUID,
+    snapshot: Any,
+    get_session: Any,
+) -> None:
+    """Persist the just-drafted section artifact and re-arm the Phase-4 gate.
+
+    Called from ``_resume_graph`` when the graph parks at
+    ``NODE_AWAIT_SECTION`` after ``node_draft_section`` has appended a fresh
+    draft to ``state["drafts"]``.
+    """
+    values = snapshot.values
+    section = values.get("current_section")
+    drafts = values.get("drafts") or []
+    # The just-drafted section is the entry with matching label — fall back
+    # to the last entry if the label match misses (defence-in-depth).
+    latest = None
+    for d in reversed(drafts):
+        if isinstance(d, dict) and d.get("section") == section:
+            latest = d
+            break
+    if latest is None and drafts:
+        latest = drafts[-1]
+    artifact = latest.get("artifact") if isinstance(latest, dict) else None
+
+    # Token/cost rollup the Scribe accumulated drafting this section.
+    usage: dict[str, Any] = values.get("drafting_usage") or {}
+
+    capped = False
+    async with get_session() as bg_session:
+        if artifact is not None:
+            await _persist_artifacts(bg_session, project_id, run_id, [artifact])
+        await _update_run_state(bg_session, run_id, "awaiting_approval", Phase.DRAFTING)
+        await _write_audit(
+            bg_session,
+            project_id=project_id,
+            workflow_run_id=run_id,
+            actor="system",
+            action="phase_4.section_ready",
+            payload={"section": section},
+        )
+        # Record the Scribe's LLM usage so the per-project cost cap (NFR-5)
+        # sees Phase-4 spend, mirroring the Critic usage write in
+        # _handle_gate_pause.
+        if usage:
+            await _write_audit(
+                bg_session,
+                project_id=project_id,
+                workflow_run_id=run_id,
+                actor="scribe",
+                action="agent.invoke",
+                payload={
+                    "agent": "scribe",
+                    "section": section,
+                    "llm_calls": usage.get("llm_calls", 0),
+                },
+                model=usage.get("model"),
+                tokens_in=usage.get("tokens_in"),
+                tokens_out=usage.get("tokens_out"),
+                cost_usd=usage.get("cost_usd"),
+            )
+        capped = await _enforce_cost_cap(bg_session, project_id, run_id)
+        if capped:
+            await _update_run_state(bg_session, run_id, "error")
+
+    artifact_ids = [str(artifact["id"])] if artifact and artifact.get("id") else []
+    await _emit(
+        project_id,
+        {
+            "type": "agent.completed",
+            "agent": "scribe",
+            "run_id": str(run_id),
+            "artifact_ids": artifact_ids,
+        },
+    )
+    if capped:
+        return
+    await _emit(
+        project_id,
+        {
+            "type": "approval.required",
+            "phase": Phase.DRAFTING.value,
+            "section": section,
+            "run_id": str(run_id),
+            "summary": f"The {section} section is ready for your review.",
         },
     )
 

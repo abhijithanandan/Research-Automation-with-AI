@@ -13,9 +13,21 @@ export type ArtifactKind =
   | "matrix"
   | "summary"
   | "section"
+  | "manuscript"
   | "figure"
   | "code"
   | "log";
+
+// Canonical seven-section order — mirrors backend SectionName in
+// app/models/schemas.py (BRD §5.2 FR-2.4).
+export type SectionName =
+  | "abstract"
+  | "introduction"
+  | "related_work"
+  | "methodology"
+  | "results"
+  | "discussion"
+  | "conclusion";
 
 export type ProducedBy =
   | "librarian"
@@ -31,15 +43,6 @@ export type PaperSource =
   | "core"
   | "europe_pmc"
   | "upload";
-
-export type SectionName =
-  | "abstract"
-  | "introduction"
-  | "related_work"
-  | "methodology"
-  | "results"
-  | "discussion"
-  | "conclusion";
 
 export interface User {
   id: string;

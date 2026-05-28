@@ -98,12 +98,20 @@ class ChromaVectorStore:
         return [{"id": ids[i], "text": docs[i], "distance": distances[i]} for i in range(len(ids))]
 
 
+_ALLOWED_VECTOR_SCHEMES = frozenset({"http", "https"})
+
+
 def _parse_url(url: str) -> tuple[str, int]:
     """Split an http[s]://host[:port][/path] URL into (host, port).
 
     Uses :mod:`urllib.parse` rather than naive prefix-stripping so we handle
     IPv6 literals, credentials, paths, and missing schemes cleanly (audit
     round-3, MED-2). Returns sensible defaults when fields are missing.
+
+    M3-B: rejects schemes outside ``{http, https}``. The vector store URL
+    is loaded from VECTOR_DB_URL env var; a misconfiguration to
+    ``file://etc/passwd`` or ``ftp://attacker.example.com`` should fail
+    loud at parse time rather than silently downgrading to a default host.
     """
     from urllib.parse import urlparse
 
@@ -112,6 +120,9 @@ def _parse_url(url: str) -> tuple[str, int]:
     if "://" not in url:
         url = f"http://{url}"
     parsed = urlparse(url)
+    scheme = (parsed.scheme or "").lower()
+    if scheme not in _ALLOWED_VECTOR_SCHEMES:
+        raise ValueError(f"VECTOR_DB_URL must use http or https; got {scheme!r} (url={url!r}).")
     host = parsed.hostname or "localhost"
     # Default port: 8000 — matches Chroma's container default. Surfaces
     # explicit values from the URL otherwise.

@@ -65,8 +65,20 @@ class Paper(BaseModel):
     added_at: datetime
 
 
-ArtifactKind = Literal["matrix", "summary", "section", "figure", "code", "log"]
+ArtifactKind = Literal["matrix", "summary", "section", "manuscript", "figure", "code", "log"]
 ProducedBy = Literal["librarian", "critic", "analyst", "scribe", "human"]
+
+# Canonical seven-section order for Phase 4 drafting. Backend + frontend share
+# this alias so a future re-ordering only changes one line. Per BRD §5.2 FR-2.4.
+SectionName = Literal[
+    "abstract",
+    "introduction",
+    "related_work",
+    "methodology",
+    "results",
+    "discussion",
+    "conclusion",
+]
 
 
 class Artifact(BaseModel):

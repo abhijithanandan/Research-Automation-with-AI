@@ -5,11 +5,12 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from uuid import UUID, uuid4
 
-from fastapi import APIRouter, HTTPException, UploadFile, status
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, status
 from pydantic import BaseModel
 from sqlalchemy import select
 
 from app.api.deps import CurrentUser, DbSession
+from app.api.rate_limit import rate_limit
 from app.models.db import AuditLogRow, PaperRow, ProjectRow, WorkflowRunRow
 from app.models.schemas import Paper
 
@@ -47,7 +48,14 @@ async def upload_paper(
     )
 
 
-@router.patch("/{paper_id}", response_model=Paper)
+@router.patch(
+    "/{paper_id}",
+    response_model=Paper,
+    # M1-C: paper toggles are the hot path during Phase 1 review. 60/min/user
+    # is generous (one toggle per second) but caps a buggy frontend or
+    # script that double-fires.
+    dependencies=[Depends(rate_limit("paper.update", max_per_window=60))],
+)
 async def update_paper(
     project_id: UUID,
     paper_id: UUID,
@@ -93,7 +101,12 @@ async def update_paper(
     return _row_to_schema(row)
 
 
-@router.delete("/{paper_id}", status_code=status.HTTP_204_NO_CONTENT)
+@router.delete(
+    "/{paper_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    # Same budget as PATCH — papers can be deleted as part of pool curation.
+    dependencies=[Depends(rate_limit("paper.delete", max_per_window=60))],
+)
 async def delete_paper(project_id: UUID, paper_id: UUID, user: CurrentUser, db: DbSession) -> None:
     """Remove a paper from the pool. Blocked after Phase 1 approval."""
     await _assert_owned(db, project_id, user.id)

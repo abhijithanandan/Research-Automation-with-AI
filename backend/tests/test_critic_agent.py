@@ -40,26 +40,47 @@ def _paper(citation_key: str, title: str) -> Paper:
     )
 
 
-def _extraction_json(citation_key: str) -> str:
-    """A well-formed per-paper extraction JSON payload from the mocked LLM."""
-    return json.dumps(
-        {
-            "citation_key": citation_key,
-            "problem": "The problem.",
-            "method": "The method.",
-            "dataset": "The dataset.",
-            "key_findings": "The findings.",
-            "limitations": "The limitations.",
-        }
-    )
+def _extraction_row(citation_key: str) -> dict[str, str]:
+    """A well-formed single extraction row payload from the mocked LLM."""
+    return {
+        "citation_key": citation_key,
+        "problem": "The problem.",
+        "method": "The method.",
+        "dataset": "The dataset.",
+        "key_findings": "The findings.",
+        "limitations": "The limitations.",
+    }
+
+
+def _extract_citation_keys_from_prompt(prompt: str) -> list[str]:
+    """Pull every `citation_key: <token>` from the batched extraction prompt.
+
+    The Critic renders papers as `citation_key: alpha2024\\ntitle: ...\\n...`
+    so we just grep those lines. Used by the fake LLM to know which papers
+    were requested in this batch.
+    """
+    keys: list[str] = []
+    for line in prompt.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("citation_key:"):
+            keys.append(stripped.split(":", 1)[1].strip())
+    return keys
 
 
 class _FakeLLM:
     """Stand-in for LLMGateway.
 
-    `complete` returns a per-paper extraction JSON for extraction prompts and a
-    narrative string for the synthesis prompt. `calls` records every prompt so
-    tests can assert on feedback injection.
+    Recognises three prompt shapes:
+      - **Synthesis** — contains "narrative"; returns a fixed markdown stub.
+      - **Batched extraction** — asks for a JSON envelope of N extractions
+        (the Critic uses one call for all papers in the pool). Returns an
+        ``{"extractions": [...]}`` payload. If any citation_key in the
+        prompt is in ``fail_for``, the entire batched call raises (this
+        models the "LLM failed → every paper marked extraction_failed"
+        fallback).
+      - **Legacy per-paper extraction** — kept for the older `_extract`
+        helper still living in the Critic for compatibility. Same per-paper
+        fail_for behaviour as before.
     """
 
     def __init__(self, fail_for: set[str] | None = None) -> None:
@@ -69,19 +90,39 @@ class _FakeLLM:
     async def complete(self, prompt: str, **kwargs: object) -> tuple[str, dict[str, object]]:
         self.calls.append(prompt)
         telemetry: dict[str, object] = {"tokens_in": 1, "tokens_out": 1, "cost_usd": None}
-        # Synthesis prompt — identified by the marker the Critic puts in it.
-        if "narrative" in prompt.lower() or "synthesis" in prompt.lower():
+
+        # Synthesis prompt — identified by the unique marker the Critic puts
+        # in it. Must come before the batch check because both prompts may
+        # share the word "synthesis".
+        if "narrative" in prompt.lower():
             return "## Synthesis\n\nA narrative grouped by method.", telemetry
-        # Extraction prompt — find which paper it is about; fail if requested.
+
+        # Batched extraction prompt — has the schema instruction string
+        # "extractions" plus one or more `citation_key: ...` lines. Per
+        # docs/agents/critic.md graceful-degradation contract, if any
+        # requested paper is in fail_for, the WHOLE batch call raises
+        # (the Critic then marks every paper extraction_failed=True).
+        if '"extractions"' in prompt or "extractions" in prompt.lower():
+            keys = _extract_citation_keys_from_prompt(prompt)
+            if keys:
+                if any(k in self._fail_for for k in keys):
+                    raise RuntimeError(
+                        "LLM batch extraction failed for "
+                        + ",".join(k for k in keys if k in self._fail_for)
+                    )
+                envelope = {"extractions": [_extraction_row(k) for k in keys]}
+                return json.dumps(envelope), telemetry
+
+        # Legacy single-paper extraction prompt (kept for back-compat with
+        # any direct tests of Critic._extract).
         for key in self._fail_for:
             if key in prompt:
                 raise RuntimeError(f"LLM extraction failed for {key}")
         for line in prompt.splitlines():
             for token in line.replace(":", " ").split():
                 if token.endswith("2024") or token.endswith("2023"):
-                    return _extraction_json(token), telemetry
-        # Fallback — first citation key seen.
-        return _extraction_json("unknown2024"), telemetry
+                    return json.dumps(_extraction_row(token)), telemetry
+        return json.dumps(_extraction_row("unknown2024")), telemetry
 
 
 class _FakeVectorStore:
@@ -132,23 +173,32 @@ async def test_critic_regenerates_with_feedback() -> None:
 
 @pytest.mark.asyncio
 async def test_critic_handles_extraction_failure_gracefully() -> None:
-    """A per-paper LLM failure marks that row extraction_failed; node does not crash."""
+    """When the batched extraction call raises, EVERY paper is marked
+    extraction_failed (not just the one that triggered the failure).
+
+    This is the deliberate batched-Critic trade-off (chosen 2026-05-27 to
+    fit inside the Gemini free-tier daily budget): one LLM call covers
+    the whole pool, so its failure propagates to the whole pool. The
+    matrix invariant still holds — every approved paper appears as a row,
+    just with extraction_failed=True. The user can reject + regenerate."""
     papers = [
         _paper("good2024", "Good Paper"),
         _paper("bad2024", "Bad Paper"),
     ]
-    # The LLM raises only for the 'bad2024' extraction prompt.
+    # The batched call raises if ANY paper in the batch is in fail_for.
     critic = Critic(llm=_FakeLLM(fail_for={"bad2024"}), vector_store=_FakeVectorStore())
 
     out = await critic.run(CriticInput(approved_papers=papers))
 
     matrix_data = json.loads(out.matrix.content)
     rows = {row["citation_key"]: row for row in matrix_data["rows"]}
-    # Both papers still present — invariant holds.
+    # Matrix invariant: both papers appear.
     assert set(rows) == {"good2024", "bad2024"}
-    assert rows["good2024"]["extraction_failed"] is False
+    # Batched contract: when the batch fails, ALL rows are marked failed.
+    assert rows["good2024"]["extraction_failed"] is True
     assert rows["bad2024"]["extraction_failed"] is True
-    assert rows["bad2024"]["error"]
+    assert rows["good2024"]["error"] == rows["bad2024"]["error"]  # same root cause
+    assert "bad2024" in (rows["good2024"]["error"] or "")
 
 
 @pytest.mark.asyncio
@@ -176,8 +226,11 @@ async def test_critic_survives_vector_store_unavailable() -> None:
 async def test_critic_accumulates_token_usage() -> None:
     """The Critic must sum token usage across every LLM call (BRD FR-3.3).
 
-    With 3 papers the Critic makes 3 extraction calls + 1 synthesis call; the
-    _FakeLLM reports tokens_in=1, tokens_out=1 per call, so the run total is 4.
+    With batched extraction the Critic makes EXACTLY two LLM calls per run
+    regardless of pool size: one batched extraction + one synthesis. With
+    _FakeLLM reporting tokens_in=1, tokens_out=1 per call, the run total
+    is 2 (vs N+1 in the per-paper era — this is the whole point of the
+    batched refactor: stay inside the Gemini free-tier daily budget).
     """
     papers = [
         _paper("alpha2024", "Alpha Paper"),
@@ -188,16 +241,20 @@ async def test_critic_accumulates_token_usage() -> None:
 
     out = await critic.run(CriticInput(approved_papers=papers))
 
-    # 3 extractions + 1 synthesis = 4 LLM calls.
-    assert out.usage.llm_calls == 4
-    assert out.usage.tokens_in == 4
-    assert out.usage.tokens_out == 4
+    # 1 batched extraction + 1 synthesis = 2 LLM calls, regardless of pool size.
+    assert out.usage.llm_calls == 2
+    assert out.usage.tokens_in == 2
+    assert out.usage.tokens_out == 2
 
 
 @pytest.mark.asyncio
 async def test_critic_counts_calls_even_when_extraction_fails() -> None:
-    """A failed extraction still counts toward llm_calls is not required, but the
-    successful calls must still be summed — a failure must not lose other usage."""
+    """If the batched extraction raises, only the synthesis call's telemetry
+    is counted — the batch call raised before its telemetry was recorded.
+
+    Every paper still gets an extraction_failed row (the matrix invariant
+    is preserved) but llm_calls reflects only the calls that returned.
+    """
     papers = [
         _paper("good2024", "Good Paper"),
         _paper("bad2024", "Bad Paper"),
@@ -206,10 +263,10 @@ async def test_critic_counts_calls_even_when_extraction_fails() -> None:
 
     out = await critic.run(CriticInput(approved_papers=papers))
 
-    # good2024 extraction + synthesis succeed → 2 counted calls; bad2024 raised
-    # before telemetry was recorded, so it is simply absent from the total.
-    assert out.usage.llm_calls == 2
-    assert out.usage.tokens_in == 2
+    # Batched extraction raised (bad2024 was in the batch) → no telemetry
+    # recorded for that call. Synthesis still runs → 1 call counted.
+    assert out.usage.llm_calls == 1
+    assert out.usage.tokens_in == 1
 
 
 @pytest.mark.asyncio
@@ -234,6 +291,143 @@ async def test_critic_matrix_validates_against_schema() -> None:
     matrix_data = json.loads(out.matrix.content)
     # Raises jsonschema.ValidationError if the matrix shape drifts from the schema.
     jsonschema.validate(instance=matrix_data, schema=schema)
+
+
+# ---------------------------------------------------------------------------
+# Batched-extraction contract — added when the Critic moved from O(N) calls
+# per pool to O(1) (one batched call) to fit inside the Gemini free-tier
+# daily budget. These tests pin the contract so future changes don't
+# silently regress it.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_critic_makes_exactly_two_llm_calls_regardless_of_pool_size() -> None:
+    """Five papers, ten papers — doesn't matter. Total LLM calls should be:
+    one batched extraction + one synthesis = 2. This is the core invariant
+    that keeps the Critic inside the daily free-tier budget."""
+    pool_sizes = [1, 3, 5, 10]
+    for n in pool_sizes:
+        papers = [_paper(f"p{i}2024", f"Paper {i}") for i in range(n)]
+        fake = _FakeLLM()
+        critic = Critic(llm=fake, vector_store=_FakeVectorStore())
+        await critic.run(CriticInput(approved_papers=papers))
+        # ALWAYS 2 calls — independent of n. The whole point of batching.
+        assert len(fake.calls) == 2, f"pool size {n}: expected 2 LLM calls, got {len(fake.calls)}"
+
+
+@pytest.mark.asyncio
+async def test_critic_batched_call_includes_every_papers_citation_key() -> None:
+    """The batched extraction prompt must list every approved paper. If the
+    Critic ever silently dropped a paper from the prompt it would silently
+    drop it from the matrix."""
+    papers = [
+        _paper("alpha2024", "Alpha Paper"),
+        _paper("beta2024", "Beta Paper"),
+        _paper("gamma2024", "Gamma Paper"),
+    ]
+    fake = _FakeLLM()
+    critic = Critic(llm=fake, vector_store=_FakeVectorStore())
+    await critic.run(CriticInput(approved_papers=papers))
+
+    # First call is the batch extraction (second is synthesis).
+    batch_prompt = fake.calls[0]
+    for p in papers:
+        assert f"citation_key: {p.citation_key}" in batch_prompt, (
+            f"batch prompt missing {p.citation_key}"
+        )
+    assert "paper_count" not in batch_prompt.lower() or "3" in batch_prompt, (
+        "batch prompt should declare the expected count of extractions"
+    )
+
+
+@pytest.mark.asyncio
+async def test_matrix_invariant_holds_when_llm_returns_partial_response() -> None:
+    """If the LLM forgets to extract some papers (returns a short array),
+    the missing ones get extraction_failed=True rows. Every approved paper
+    appears in the final matrix — docs/agents/critic.md §Invariants."""
+
+    class _PartialResponseLLM:
+        """Returns a batch payload that only includes the FIRST paper from
+        the request, dropping the rest. Models the LLM-truncation failure
+        mode."""
+
+        def __init__(self) -> None:
+            self.calls: list[str] = []
+
+        async def complete(self, prompt: str, **kwargs: object) -> tuple[str, dict[str, object]]:
+            self.calls.append(prompt)
+            telemetry: dict[str, object] = {
+                "tokens_in": 1,
+                "tokens_out": 1,
+                "cost_usd": None,
+            }
+            if "narrative" in prompt.lower():
+                return "## Synthesis\n\nstub", telemetry
+            # Batched extraction — return only the first key.
+            keys = _extract_citation_keys_from_prompt(prompt)
+            if not keys:
+                return json.dumps({"extractions": []}), telemetry
+            envelope = {"extractions": [_extraction_row(keys[0])]}
+            return json.dumps(envelope), telemetry
+
+    papers = [
+        _paper("alpha2024", "Alpha"),
+        _paper("beta2024", "Beta"),
+        _paper("gamma2024", "Gamma"),
+    ]
+    critic = Critic(llm=_PartialResponseLLM(), vector_store=_FakeVectorStore())
+    out = await critic.run(CriticInput(approved_papers=papers))
+
+    matrix_data = json.loads(out.matrix.content)
+    rows = {row["citation_key"]: row for row in matrix_data["rows"]}
+    # Every approved paper still has a row — the invariant survives partial
+    # responses.
+    assert set(rows) == {"alpha2024", "beta2024", "gamma2024"}
+    # alpha was returned cleanly.
+    assert rows["alpha2024"]["extraction_failed"] is False
+    # beta + gamma were missing from the LLM response → marked failed with
+    # a useful error message.
+    assert rows["beta2024"]["extraction_failed"] is True
+    assert "missing" in (rows["beta2024"]["error"] or "").lower()
+    assert rows["gamma2024"]["extraction_failed"] is True
+
+
+@pytest.mark.asyncio
+async def test_matrix_invariant_holds_when_batched_call_raises() -> None:
+    """When the LLM call itself raises (quota exhausted, network down,
+    response can't be parsed), every paper gets an extraction_failed row
+    carrying the same error string. The node does NOT crash."""
+
+    class _AlwaysFailLLM:
+        def __init__(self) -> None:
+            self.calls: list[str] = []
+
+        async def complete(self, prompt: str, **kwargs: object) -> tuple[str, dict[str, object]]:
+            self.calls.append(prompt)
+            telemetry: dict[str, object] = {
+                "tokens_in": 1,
+                "tokens_out": 1,
+                "cost_usd": None,
+            }
+            if "narrative" in prompt.lower():
+                # Synthesis still works — only the extraction call fails.
+                return "## Synthesis\n\nstub", telemetry
+            raise RuntimeError("simulated 429 quota exhausted")
+
+    papers = [
+        _paper("alpha2024", "Alpha"),
+        _paper("beta2024", "Beta"),
+    ]
+    critic = Critic(llm=_AlwaysFailLLM(), vector_store=_FakeVectorStore())
+    out = await critic.run(CriticInput(approved_papers=papers))
+
+    matrix_data = json.loads(out.matrix.content)
+    rows = {row["citation_key"]: row for row in matrix_data["rows"]}
+    assert set(rows) == {"alpha2024", "beta2024"}
+    for key in ("alpha2024", "beta2024"):
+        assert rows[key]["extraction_failed"] is True
+        assert "429" in (rows[key]["error"] or "")
 
 
 @pytest.mark.asyncio

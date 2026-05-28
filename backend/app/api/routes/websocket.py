@@ -92,7 +92,13 @@ async def project_events(project_id: UUID, ws: WebSocket) -> None:
     remote_ip = ws.client.host if ws.client else "unknown"
     await ws.accept()
     if not await _check_handshake_rate_limit(remote_ip):
-        _log.warning("ws_rate_limited", remote_ip=remote_ip)
+        _log.warning(
+            "ws.auth.rate_limited",
+            actor=remote_ip,
+            project_id=str(project_id),
+            result="rejected",
+            reason_code="rate_limited",
+        )
         # 4429 mirrors HTTP 429; the frontend ws.ts treats anything outside
         # the no-reconnect set as retryable, so the client will back off.
         await ws.close(code=4429, reason="rate limited")
@@ -102,6 +108,13 @@ async def project_events(project_id: UUID, ws: WebSocket) -> None:
     try:
         first_msg = await asyncio.wait_for(ws.receive_json(), timeout=10.0)
     except TimeoutError:
+        _log.warning(
+            "ws.auth.timeout",
+            actor=remote_ip,
+            project_id=str(project_id),
+            result="rejected",
+            reason_code="timeout",
+        )
         await ws.close(code=4401, reason="auth timeout")
         return
     except (WebSocketDisconnect, ConnectionError, RuntimeError, ValueError) as exc:
@@ -110,7 +123,14 @@ async def project_events(project_id: UUID, ws: WebSocket) -> None:
         # from receive_json). Log only the exception *type*: str(exc) on some
         # WebSocket frame errors can echo client-supplied payload fragments
         # into logs — information-disclosure risk on shared logging systems.
-        _log.warning("ws_auth_recv_error", error_type=type(exc).__name__)
+        _log.warning(
+            "ws.auth.recv_error",
+            actor=remote_ip,
+            project_id=str(project_id),
+            result="rejected",
+            reason_code="recv_error",
+            error_type=type(exc).__name__,
+        )
         await ws.close(code=4401, reason="auth error")
         return
 
@@ -139,12 +159,26 @@ async def project_events(project_id: UUID, ws: WebSocket) -> None:
         # errors fetching JWKs). We keep a broad catch — *any* failure means
         # we cannot trust this connection — but log the exception class so
         # ops can distinguish auth-rejection from auth-infrastructure-down.
-        _log.warning("ws_auth_verify_failed", error_type=type(exc).__name__)
+        _log.warning(
+            "ws.auth.verify_failed",
+            actor=remote_ip,
+            project_id=str(project_id),
+            result="rejected",
+            reason_code="verify_failed",
+            error_type=type(exc).__name__,
+        )
         await ws.close(code=4401, reason="invalid token")
         return
 
     uid = claims.get("uid")
     if not uid:
+        _log.warning(
+            "ws.auth.no_uid",
+            actor=remote_ip,
+            project_id=str(project_id),
+            result="rejected",
+            reason_code="no_uid_in_claims",
+        )
         await ws.close(code=4401, reason="invalid token")
         return
 
@@ -153,11 +187,24 @@ async def project_events(project_id: UUID, ws: WebSocket) -> None:
     async with get_session() as db:
         project = await db.get(ProjectRow, project_id)
         if project is None or project.owner_id != user_id:
+            _log.warning(
+                "ws.auth.unauthorized_project",
+                actor=str(user_id),
+                project_id=str(project_id),
+                result="rejected",
+                reason_code="unauthorized_project",
+            )
             await ws.close(code=4403, reason="unauthorized for project")
             return
 
     await ws.send_json({"type": "auth.ok"})
-    _log.info("ws_connected", project_id=str(project_id))
+    _log.info(
+        "ws.auth.connected",
+        actor=str(user_id),
+        project_id=str(project_id),
+        result="allowed",
+        reason_code="ok",
+    )
 
     # ---- Subscribe to project events -------------------------------------
     queue = subscribe_project(project_id)

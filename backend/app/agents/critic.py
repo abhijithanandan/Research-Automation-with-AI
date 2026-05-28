@@ -46,6 +46,39 @@ Return JSON with keys: citation_key, problem, method, dataset,
 key_findings, limitations.
 """
 
+# Batched extraction template — one LLM call returns a JSON array containing
+# all per-paper extractions. Lets the Critic stay inside the Gemini free-tier
+# daily budget (20 calls/day) on typical small-pool runs. The Scribe will
+# still write seven sections, the Librarian still expands once, but the
+# Critic's calls drop from O(N) to O(1).
+#
+# The model is instructed to emit a JSON object with one field `extractions`,
+# whose value is a list of per-paper rows. Using an object envelope rather
+# than a bare array makes JSON-mode parsing more reliable across providers
+# (Gemini's response_schema/response_mime_type works more cleanly with
+# object roots than array roots).
+_BATCH_EXTRACTION_PROMPT_TEMPLATE = """\
+You are a research critic. Read the {paper_count} papers below and extract
+exactly five attributes per paper. Be concise — one or two sentences each.
+
+{feedback_block}Papers (each paper begins with its citation_key):
+{papers_block}
+{rag_block}
+Return JSON in this exact shape:
+
+  {{
+    "extractions": [
+      {{"citation_key": "...", "problem": "...", "method": "...",
+        "dataset": "...", "key_findings": "...", "limitations": "..."}},
+      ...one object per paper, in the same order...
+    ]
+  }}
+
+The "extractions" array MUST contain exactly {paper_count} entries — one for
+every paper above, identified by its citation_key. Do not skip papers, do
+not invent new citation_keys.
+"""
+
 _SYNTHESIS_PROMPT_TEMPLATE = """\
 You are a research critic writing a literature synthesis (a narrative
 review). Using the per-paper extractions below, write a 3-6 paragraph
@@ -76,6 +109,18 @@ class MatrixModel(BaseModel):
     """The full comparison matrix — JSON-serialized into the matrix Artifact."""
 
     rows: list[PaperExtraction]
+
+
+class _BatchExtractionsEnvelope(BaseModel):
+    """LLM response shape for the batched extraction call.
+
+    Object-root envelope (not a bare array) — keeps Gemini's
+    ``response_schema=...`` mode happy and gives Pydantic something concrete
+    to validate against. Internal-only; the Critic unwraps this into a flat
+    ``list[PaperExtraction]`` before persisting.
+    """
+
+    extractions: list[PaperExtraction]
 
 
 class CriticInput(BaseModel):
@@ -133,11 +178,14 @@ class Critic(Agent[CriticInput, CriticOutput]):
         # 1. Embed -----------------------------------------------------------
         rag_available = await self._embed(project_id, papers)
 
-        # 2. Extract per-paper attributes ------------------------------------
-        rows = [
-            await self._extract(project_id, paper, payload.feedback, rag_available, usage)
-            for paper in papers
-        ]
+        # 2. Extract attributes for ALL papers in one batched LLM call.
+        # The per-paper alternative (one call per paper) was correct but
+        # blew through the Gemini free-tier daily budget on pools of 5+
+        # papers. Batching keeps the every-paper invariant — on LLM
+        # failure or partial response, missing rows are filled in as
+        # `extraction_failed=True` so the matrix still has one row per
+        # approved paper (docs/agents/critic.md §Invariants).
+        rows = await self._extract_batch(project_id, papers, payload.feedback, rag_available, usage)
 
         # 3. Build the matrix ------------------------------------------------
         matrix_model = MatrixModel(rows=rows)
@@ -254,6 +302,120 @@ class Critic(Agent[CriticInput, CriticOutput]):
         except VectorStoreUnavailableError as exc:
             _log.warning("critic_rag_unavailable", error=str(exc))
             return False
+
+    async def _extract_batch(
+        self,
+        project_id: UUID,
+        papers: list[Paper],
+        feedback: str | None,
+        rag_available: bool,
+        usage: CriticUsage,
+    ) -> list[PaperExtraction]:
+        """Extract attributes for every approved paper in a SINGLE LLM call.
+
+        Cuts the Critic's extraction calls from O(N) papers to O(1), which
+        is the difference between fitting inside the Gemini free-tier daily
+        budget (20 calls/day) and blowing through it.
+
+        Failure semantics preserve docs/agents/critic.md §Invariants — every
+        approved paper appears in the returned list. The graceful-degradation
+        ladder, from best to worst, is:
+
+          1. LLM returns a clean object with N extractions  → all N papers OK.
+          2. LLM returns an object missing some papers       → missing ones get
+             ``extraction_failed=True`` rows; present ones flow through.
+          3. LLM call raises OR response can't be parsed     → every paper gets
+             an ``extraction_failed=True`` row carrying the same error string;
+             the node does not crash, the user can reject + regenerate.
+        """
+        # Optional RAG context — one query covering the broad topic from the
+        # first paper's title is enough for the batched call. With the
+        # per-paper version we queried once per paper; here a single shared
+        # block is fine because the prompt scope is already wider.
+        rag_block = ""
+        if rag_available and papers:
+            try:
+                hits = await self._vs.query(namespace=str(project_id), query=papers[0].title, k=3)
+                if hits:
+                    snippets = " ".join(str(h.get("text", "")) for h in hits)
+                    rag_block = f"Related context: {snippets}\n"
+            except VectorStoreUnavailableError as exc:
+                _log.warning("critic_rag_query_failed", error=str(exc))
+
+        feedback_block = (
+            f"Apply the following revision instruction: {feedback}\n\n" if feedback else ""
+        )
+        # Render the papers block — one entry per paper with citation_key,
+        # title, abstract. Keeps order so the model's response ordering
+        # matches our internal list when we re-merge.
+        papers_block_lines: list[str] = []
+        for paper in papers:
+            papers_block_lines.append(
+                f"---\ncitation_key: {paper.citation_key}\n"
+                f"title: {paper.title}\n"
+                f"abstract: {paper.abstract or '(no abstract available)'}\n"
+            )
+        papers_block = "".join(papers_block_lines)
+
+        prompt = _BATCH_EXTRACTION_PROMPT_TEMPLATE.format(
+            paper_count=len(papers),
+            feedback_block=feedback_block,
+            papers_block=papers_block,
+            rag_block=rag_block,
+        )
+
+        try:
+            from google.genai import types as genai_types
+
+            config = genai_types.GenerateContentConfig(
+                response_mime_type="application/json",
+                response_schema=_BatchExtractionsEnvelope,
+            )
+            text, telemetry = await self._llm.complete(prompt, config=config)
+            self._accumulate(usage, telemetry)
+            envelope = _BatchExtractionsEnvelope.model_validate_json(text)
+            received_by_key: dict[str, PaperExtraction] = {
+                row.citation_key: row for row in envelope.extractions if row.citation_key
+            }
+        except Exception as exc:  # any failure → every paper gets an error row
+            _log.warning("critic_batch_extraction_failed", error=str(exc))
+            return [
+                PaperExtraction(
+                    citation_key=paper.citation_key,
+                    extraction_failed=True,
+                    error=str(exc),
+                )
+                for paper in papers
+            ]
+
+        # Stitch the response back to the approved-pool order. Papers that
+        # the LLM forgot to extract get an extraction_failed row so the
+        # matrix invariant (one row per approved paper) holds.
+        result: list[PaperExtraction] = []
+        for paper in papers:
+            row = received_by_key.get(paper.citation_key)
+            if row is None:
+                result.append(
+                    PaperExtraction(
+                        citation_key=paper.citation_key,
+                        extraction_failed=True,
+                        error="missing from batched LLM response",
+                    )
+                )
+            else:
+                # Ensure citation_key matches the approved paper — the LLM is
+                # asked to echo our key, but be defensive about drift.
+                result.append(
+                    PaperExtraction(
+                        citation_key=paper.citation_key,
+                        problem=row.problem,
+                        method=row.method,
+                        dataset=row.dataset,
+                        key_findings=row.key_findings,
+                        limitations=row.limitations,
+                    )
+                )
+        return result
 
     async def _extract(
         self,

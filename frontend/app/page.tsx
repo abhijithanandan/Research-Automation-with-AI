@@ -3,15 +3,21 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import { ApprovalPanel, type OverridePayload } from "@/components/workflow/ApprovalPanel";
+import { Markdown } from "@/components/workflow/Markdown";
 import { PhaseTracker } from "@/components/workflow/PhaseTracker";
+import {
+  SectionReview,
+  type SectionOverridePayload,
+} from "@/components/workflow/SectionReview";
 import {
   SynthesisReadOnly,
   SynthesisReview,
   type SynthesisOverridePayload,
 } from "@/components/workflow/SynthesisReview";
-import { api } from "@/lib/api";
+import { ApiError, api } from "@/lib/api";
+import type { Artifact, Paper, Phase, SectionName, WorkflowState } from "@/lib/types";
+import { cn } from "@/lib/utils";
 import { connectProjectEvents, type ManagedSocket, type ServerEvent } from "@/lib/ws";
-import type { Artifact, Paper, Phase, WorkflowState } from "@/lib/types";
 
 // ---------------------------------------------------------------------------
 // UI state machine
@@ -23,6 +29,7 @@ type View =
   | "running"
   | "awaiting"
   | "synthesis"
+  | "drafting"
   | "busy"
   | "done"
   | "error";
@@ -96,8 +103,14 @@ function sourceLabel(source: string) {
 }
 
 function sourceBadgeClass(source: string) {
+  // Source badges encode WHICH database a paper came from — kept multi-hue
+  // because the colors carry information (not chrome). The previous palette
+  // included blue for semantic_scholar; swapped to cyan-300 on slate (a
+  // distinct neutral) so the trading-terminal palette has no pure blues
+  // while keeping the four sources visually separable.
   if (source === "arxiv") return "bg-orange-500/10 text-orange-400 border-orange-500/20";
-  if (source === "semantic_scholar") return "bg-blue-500/10 text-blue-400 border-blue-500/20";
+  if (source === "semantic_scholar")
+    return "bg-slate-700/40 text-cyan-300 border-cyan-500/20";
   if (source === "core") return "bg-emerald-500/10 text-emerald-400 border-emerald-500/20";
   if (source === "europe_pmc") return "bg-pink-500/10 text-pink-400 border-pink-500/20";
   return "bg-slate-700/50 text-slate-400 border-slate-600/50";
@@ -121,6 +134,21 @@ function phaseLabel(phase: Phase): string {
   return map[phase] ?? phase;
 }
 
+/** Normalize a caught error into the {message, kind} shape the UI state holds.
+ *
+ * Recognizes ApiError (carries .kind directly), plain Error, and unknown
+ * thrown values. M3-C: the kind lets the renderer pick a phase-conflict
+ * banner for 409s vs. a generic toast for everything else. */
+function describeError(err: unknown, fallback: string): { message: string; kind?: string } {
+  if (err instanceof ApiError) {
+    return { message: err.message || fallback, kind: err.kind };
+  }
+  if (err instanceof Error) {
+    return { message: err.message || fallback };
+  }
+  return { message: fallback };
+}
+
 // ---------------------------------------------------------------------------
 // Component
 // ---------------------------------------------------------------------------
@@ -131,7 +159,14 @@ export default function HomePage() {
   const [title, setTitle] = useState("");
   const [seedQuery, setSeedQuery] = useState("");
   const [view, setView] = useState<View>("idle");
-  const [error, setError] = useState<string | null>(null);
+  // M3-C: capture the error category alongside the message so the renderer
+  // can pick a recovery affordance per kind (conflict banner vs network
+  // toast vs validation inline). The legacy code passed only a string,
+  // collapsing every error class to the same generic "Something went wrong"
+  // banner.
+  const [error, setError] = useState<{ message: string; kind?: string } | null>(
+    null,
+  );
   const [ctx, setCtx] = useState<RunCtx | null>(null);
   const [logLines, setLogLines] = useState<string[]>([]);
   const logEndRef = useRef<HTMLDivElement>(null);
@@ -141,10 +176,17 @@ export default function HomePage() {
   const [matrix, setMatrix] = useState<Artifact | null>(null);
   const [summary, setSummary] = useState<Artifact | null>(null);
   const [synthesisLoading, setSynthesisLoading] = useState(false);
+  // Phase 4 — drafting state
+  const [sectionArtifact, setSectionArtifact] = useState<Artifact | null>(null);
+  const [currentSection, setCurrentSection] = useState<SectionName | null>(null);
+  const [sectionLoading, setSectionLoading] = useState(false);
+  const [manuscript, setManuscript] = useState<Artifact | null>(null);
   // Which phase the DONE screen should report as complete. Set when the
   // workflow finishes a phase — not inferred from ctx.phase, which is unreliable
   // (the backend reports phase="synthesis" even after synthesis is approved).
-  const [completedPhase, setCompletedPhase] = useState<"discovery" | "synthesis" | null>(null);
+  const [completedPhase, setCompletedPhase] = useState<
+    "discovery" | "synthesis" | "drafting" | null
+  >(null);
   const wsRef = useRef<ManagedSocket | null>(null);
 
   useEffect(() => {
@@ -176,7 +218,23 @@ export default function HomePage() {
       case "approval.required":
         setApprovalSummary(evt.summary ?? "Review the output below.");
         setCtx((c) => c ? { ...c, phase: evt.phase, state: "awaiting_approval" } : c);
-        if (evt.phase === "synthesis") {
+        if (evt.phase === "drafting") {
+          // Phase 4 — Scribe paused at a per-section gate. The event carries
+          // the section name; fetch the latest section artifact (most recent
+          // by created_at — the one the Scribe just produced).
+          setCurrentSection(evt.section ?? null);
+          setSectionLoading(true);
+          setView("drafting");
+          api.artifacts
+            .list(projectId, "section", DEV_TOKEN)
+            .then((sections) => {
+              // The backend filter returns all section artifacts for the
+              // project; pick the most recent one (the Scribe's latest draft).
+              setSectionArtifact(latestArtifact(sections));
+            })
+            .catch(() => setError({ message: "Failed to load the drafted section." }))
+            .finally(() => setSectionLoading(false));
+        } else if (evt.phase === "synthesis") {
           // Phase 2 — load the Critic's matrix + summary artifacts, plus the
           // paper pool so the matrix can show titles (not just citation keys).
           setSynthesisLoading(true);
@@ -191,7 +249,7 @@ export default function HomePage() {
               setSummary(latestArtifact(summaries));
               if (paperList.length > 0) setPapers(paperList);
             })
-            .catch(() => setError("Failed to load synthesis artifacts."))
+            .catch(() => setError({ message: "Failed to load synthesis artifacts." }))
             .finally(() => setSynthesisLoading(false));
         } else if (evt.phase === "discovery") {
           // Phase 1 — load the candidate paper pool. Guard against a replayed
@@ -200,7 +258,7 @@ export default function HomePage() {
           api.papers
             .list(projectId, DEV_TOKEN)
             .then((p) => setPapers(p))
-            .catch(() => setError("Failed to load candidate papers."))
+            .catch(() => setError({ message: "Failed to load candidate papers." }))
             .finally(() => {
               setPapersLoading(false);
               setView((v) =>
@@ -213,35 +271,56 @@ export default function HomePage() {
         setCtx((c) => c ? { ...c, phase: evt.phase, state: evt.state, runId: evt.run_id } : c);
         // Guarded functional updates: a replayed/late state.changed must never
         // knock the user out of an active approval screen back into "busy".
-        if (evt.phase === "done" || evt.phase === "drafting") {
-          // Phase 2 approved — drafting begins (Scribe is a Phase 4 stub).
-          setCompletedPhase("synthesis");
+        if (evt.phase === "done" && evt.state === "approved") {
+          // Phase 4 complete — manuscript assembled. Fetch it for the done view.
+          setCompletedPhase("drafting");
           setView("done");
-        } else if (evt.state === "approved" && evt.phase === "synthesis") {
-          // Synthesis approved & graph ran to completion (draft stubs → assemble).
-          setCompletedPhase("synthesis");
-          setView("done");
-        } else if (evt.state === "approved" && evt.phase === "discovery") {
-          // Phase 1 approved — synthesis is about to run; show "busy" ONLY while
-          // still on a Phase-1 screen. If we are already showing the synthesis
-          // review (the approval.required arrived first, or this is a replay),
-          // do not regress.
-          setView((v) =>
-            v === "awaiting" || v === "running" ? "busy" : v,
+          api.artifacts
+            .list(projectId, "manuscript", DEV_TOKEN)
+            .then((manuscripts) => setManuscript(latestArtifact(manuscripts)))
+            .catch(() => {
+              /* manuscript fetch is best-effort; done screen still shows logs */
+            });
+        } else if (evt.state === "approved" && evt.phase === "drafting") {
+          // Phase 2 approve → Scribe is about to draft the first section.
+          // Don't render the done screen here — the next approval.required
+          // (phase=drafting, section=abstract) will switch us to drafting view.
+          setLogLines((l) =>
+            l.includes("✓  Synthesis approved — Scribe drafting…")
+              ? l
+              : [...l, "✓  Synthesis approved — Scribe drafting…"],
           );
+          setView((v) => (v === "synthesis" ? "busy" : v));
+        } else if (evt.state === "approved" && evt.phase === "synthesis") {
+          // Phase 1 approve → Critic is about to synthesize. Show busy until
+          // approval.required{phase:"synthesis"} arrives.
           setLogLines((l) =>
             l.includes("✓  Pool approved — Critic synthesizing…")
               ? l
               : [...l, "✓  Pool approved — Critic synthesizing…"],
           );
+          setView((v) => (v === "awaiting" || v === "running" ? "busy" : v));
         } else if (evt.state === "awaiting_approval") {
           // handled by approval.required
         } else if (evt.state === "running" && evt.phase === "discovery") {
           setView((v) => (v === "idle" || v === "creating" ? "running" : v));
         } else if (evt.state === "error") {
-          setError("Workflow encountered an error.");
+          setError({ message: "Workflow encountered an error." });
           setView("error");
         }
+        break;
+      case "cost.cap_warn":
+        setLogLines((l) => [
+          ...l,
+          `⚠  Spend $${evt.spend_usd.toFixed(2)} of $${evt.cap_usd.toFixed(2)} cap (${Math.round(evt.warn_pct * 100)}% threshold)`,
+        ]);
+        break;
+      case "cost.cap_exceeded":
+        setError({
+          kind: "conflict",
+          message: `Token cap reached: spent $${evt.spend_usd.toFixed(2)} of the $${evt.cap_usd.toFixed(2)} budget. Raise the project's cap to continue.`,
+        });
+        setView("error");
         break;
     }
   }, []);
@@ -255,6 +334,9 @@ export default function HomePage() {
     setPapers([]);
     setMatrix(null);
     setSummary(null);
+    setSectionArtifact(null);
+    setCurrentSection(null);
+    setManuscript(null);
     setCompletedPhase(null);
     try {
       const project = await api.projects.create(
@@ -268,14 +350,17 @@ export default function HomePage() {
         projectId: project.id,
         token: DEV_TOKEN,
         onEvent: (evt) => handleEvent(evt, project.id),
-        onError: () => setError("WebSocket connection error."),
-        onClose: (e) => { if (e.code !== 1000) setError(`WebSocket closed (code ${e.code}).`); },
+        onError: () => setError({ message: "WebSocket connection error.", kind: "network" }),
+        onClose: (e) => {
+          if (e.code !== 1000)
+            setError({ message: `WebSocket closed (code ${e.code}).`, kind: "network" });
+        },
       });
       await api.workflow.start(project.id, DEV_TOKEN);
       setView("running");
       setLogLines(["Project created. Librarian starting…"]);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to start workflow.");
+      setError(describeError(err, "Failed to start workflow."));
       setView("error");
     }
   }
@@ -286,7 +371,7 @@ export default function HomePage() {
     try {
       await api.workflow.approve(ctx.projectId, null, DEV_TOKEN);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Approve failed.");
+      setError(describeError(err, "Approve failed."));
       setView("error");
     }
   }
@@ -299,7 +384,7 @@ export default function HomePage() {
       setView("running");
       setLogLines((l) => [...l, "↩  Rejected — Librarian regenerating…"]);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Reject failed.");
+      setError(describeError(err, "Reject failed."));
       setView("error");
     }
   }
@@ -310,7 +395,7 @@ export default function HomePage() {
     try {
       await api.workflow.override(ctx.projectId, payload, DEV_TOKEN);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Override failed.");
+      setError(describeError(err, "Override failed."));
       setView("error");
     }
   }
@@ -322,7 +407,7 @@ export default function HomePage() {
       await api.workflow.reject(ctx.projectId, feedback, DEV_TOKEN);
       setLogLines((l) => [...l, "↩  Rejected — Critic regenerating synthesis…"]);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Reject failed.");
+      setError(describeError(err, "Reject failed."));
       setView("error");
     }
   }
@@ -342,17 +427,17 @@ export default function HomePage() {
     <div className="min-h-screen flex flex-col" style={{ background: "var(--bg)" }}>
 
       {/* ── Top nav ─────────────────────────────────────────────────────── */}
-      <header className="border-b border-[#1e2d45] px-6 py-3 flex items-center justify-between sticky top-0 z-10 backdrop-blur-sm"
+      <header className="border-b border-border px-6 py-3 flex items-center justify-between sticky top-0 z-10 backdrop-blur-sm"
         style={{ background: "rgba(10,15,30,0.85)" }}>
         <div className="flex items-center gap-3">
-          <div className="flex h-7 w-7 items-center justify-center rounded-lg bg-blue-500/20 border border-blue-500/30">
-            <svg className="h-3.5 w-3.5 text-blue-400" viewBox="0 0 16 16" fill="none">
+          <div className="flex h-7 w-7 items-center justify-center rounded-lg border border-emerald-500/30 bg-emerald-500/20">
+            <svg className="h-3.5 w-3.5 text-emerald-400" viewBox="0 0 16 16" fill="none">
               <circle cx="6" cy="6" r="4" stroke="currentColor" strokeWidth="1.5"/>
               <path d="M9 9l4 4" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"/>
             </svg>
           </div>
           <span className="text-sm font-semibold tracking-tight text-slate-100">ResearchFlow AI</span>
-          <span className="rounded-full bg-blue-500/10 border border-blue-500/20 px-2 py-0.5 text-[10px] font-medium text-blue-400 uppercase tracking-wider">
+          <span className="rounded-full border border-emerald-500/20 bg-emerald-500/10 px-2 py-0.5 text-[10px] font-medium uppercase tracking-wider text-emerald-400">
             {ctx ? phaseLabel(ctx.phase) : "Phase 1 + 2"}
           </span>
         </div>
@@ -366,11 +451,22 @@ export default function HomePage() {
 
       {/* ── Main ────────────────────────────────────────────────────────── */}
       <main className="flex-1 px-4 py-10 sm:px-6">
-        <div className="mx-auto max-w-2xl space-y-6">
+        {/* Width unlock: review-heavy views (synthesis matrix, per-section
+            drafting, the assembled-manuscript done screen) need real estate
+            so the comparison table and rendered markdown stop nesting
+            scrollbars inside the legacy max-w-2xl cap. */}
+        <div
+          className={cn(
+            "mx-auto space-y-6",
+            ["synthesis", "drafting", "done"].includes(view)
+              ? "max-w-7xl"
+              : "max-w-2xl",
+          )}
+        >
 
           {/* Phase tracker */}
           {ctx && (
-            <div className="animate-fade-in rounded-xl border border-[#1e2d45] bg-[#111827] px-5 py-4">
+            <div className="animate-fade-in rounded-xl border border-border bg-background px-5 py-4">
               <PhaseTracker current={ctx.phase} />
             </div>
           )}
@@ -389,7 +485,7 @@ export default function HomePage() {
               </div>
 
               <form onSubmit={handleCreate}
-                className="rounded-xl border border-[#1e2d45] bg-[#111827] p-6 space-y-5">
+                className="rounded-xl border border-border bg-background p-6 space-y-5">
                 <div className="space-y-1.5">
                   <label className="block text-xs font-medium text-slate-400 uppercase tracking-wider" htmlFor="title">
                     Project title
@@ -398,7 +494,7 @@ export default function HomePage() {
                     id="title"
                     type="text"
                     required
-                    className="w-full rounded-lg border border-[#1e2d45] bg-[#0a0f1e] px-3.5 py-2.5 text-sm text-slate-200 placeholder-slate-600 transition-colors focus:border-blue-500/50 focus:outline-none focus:ring-1 focus:ring-blue-500/30"
+                    className="w-full rounded-lg border border-border bg-background px-3.5 py-2.5 text-sm text-slate-200 placeholder-slate-600 transition-colors focus:border-emerald-500/60 focus:outline-none focus:ring-1 focus:ring-emerald-500/30"
                     placeholder="Survey of deep learning in medical imaging"
                     value={title}
                     onChange={(e) => setTitle(e.target.value)}
@@ -412,7 +508,7 @@ export default function HomePage() {
                     id="seed"
                     type="text"
                     required
-                    className="w-full rounded-lg border border-[#1e2d45] bg-[#0a0f1e] px-3.5 py-2.5 text-sm text-slate-200 placeholder-slate-600 transition-colors focus:border-blue-500/50 focus:outline-none focus:ring-1 focus:ring-blue-500/30"
+                    className="w-full rounded-lg border border-border bg-background px-3.5 py-2.5 text-sm text-slate-200 placeholder-slate-600 transition-colors focus:border-emerald-500/60 focus:outline-none focus:ring-1 focus:ring-emerald-500/30"
                     placeholder="convolutional neural networks histopathology classification"
                     value={seedQuery}
                     onChange={(e) => setSeedQuery(e.target.value)}
@@ -421,7 +517,7 @@ export default function HomePage() {
                 </div>
                 <button
                   type="submit"
-                  className="flex items-center gap-2 rounded-lg bg-blue-600 px-5 py-2.5 text-sm font-medium text-white transition-all hover:bg-blue-500 hover:shadow-[0_0_16px_rgba(59,130,246,0.3)] focus:outline-none focus:ring-2 focus:ring-blue-500/50"
+                  className="flex items-center gap-2 rounded-lg bg-emerald-500 px-5 py-2.5 text-sm font-medium text-black transition-all hover:bg-emerald-400 hover:shadow-[0_0_16px_oklch(72%_0.20_155_/_0.35)] focus:outline-none focus:ring-2 focus:ring-emerald-500/50"
                 >
                   <svg className="h-3.5 w-3.5" viewBox="0 0 16 16" fill="none">
                     <path d="M8 3v10M3 8h10" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"/>
@@ -434,8 +530,8 @@ export default function HomePage() {
 
           {/* ── CREATING ────────────────────────────────────────────────── */}
           {view === "creating" && (
-            <div className="flex items-center gap-3 rounded-xl border border-[#1e2d45] bg-[#111827] px-5 py-4 text-sm text-slate-400">
-              <span className="h-4 w-4 animate-spin rounded-full border-2 border-slate-700 border-t-blue-500" />
+            <div className="flex items-center gap-3 rounded-xl border border-border bg-background px-5 py-4 text-sm text-slate-400">
+              <span className="h-4 w-4 animate-spin rounded-full border-2 border-border border-t-emerald-500" />
               Creating project and connecting…
             </div>
           )}
@@ -443,8 +539,8 @@ export default function HomePage() {
           {/* ── RUNNING / BUSY ──────────────────────────────────────────── */}
           {(view === "running" || view === "busy") && (
             <div className="space-y-3 animate-fade-in">
-              <div className="flex items-center gap-3 rounded-xl border border-[#1e2d45] bg-[#111827] px-5 py-3 text-sm text-slate-400">
-                <span className="h-3.5 w-3.5 animate-spin rounded-full border-2 border-slate-700 border-t-blue-500" />
+              <div className="flex items-center gap-3 rounded-xl border border-border bg-background px-5 py-3 text-sm text-slate-400">
+                <span className="h-3.5 w-3.5 animate-spin rounded-full border-2 border-border border-t-emerald-500" />
                 {view === "busy" ? "Waiting for workflow to advance…" : "Librarian is fetching papers…"}
               </div>
               <AgentLog lines={logLines} endRef={logEndRef} />
@@ -468,14 +564,30 @@ export default function HomePage() {
             </div>
           )}
 
+          {/* ── DRAFTING (Phase 4) ─────────────────────────────────────── */}
+          {view === "drafting" && (
+            <div className="space-y-4 animate-fade-in">
+              <AgentLog lines={logLines} endRef={logEndRef} />
+              <SectionReview
+                section={sectionArtifact}
+                currentSection={currentSection}
+                loading={sectionLoading}
+                busy={false}
+                onApprove={handleApprove}
+                onReject={handleSynthesisReject}
+                onOverride={handleOverride}
+              />
+            </div>
+          )}
+
           {/* ── AWAITING (Phase 1) ──────────────────────────────────────── */}
           {view === "awaiting" && (
             <div className="space-y-4 animate-fade-in">
               <AgentLog lines={logLines} endRef={logEndRef} />
 
               {/* Paper list */}
-              <div className="rounded-xl border border-[#1e2d45] bg-[#111827] overflow-hidden">
-                <div className="flex items-center justify-between border-b border-[#1e2d45] px-5 py-4">
+              <div className="rounded-xl border border-border bg-background overflow-hidden">
+                <div className="flex items-center justify-between border-b border-border px-5 py-4">
                   <div>
                     <h2 className="text-sm font-semibold text-slate-200">
                       Candidate papers
@@ -485,7 +597,7 @@ export default function HomePage() {
                     </p>
                   </div>
                   {papers.length > 0 && (
-                    <div className="shrink-0 rounded-full bg-blue-500/10 border border-blue-500/20 px-3 py-1 text-xs font-medium text-blue-400">
+                    <div className="shrink-0 rounded-full border border-emerald-500/20 bg-emerald-500/10 px-3 py-1 text-xs font-medium text-emerald-400">
                       {approvedCount} / {papers.length} selected
                     </div>
                   )}
@@ -493,7 +605,7 @@ export default function HomePage() {
 
                 {papersLoading && (
                   <div className="flex items-center gap-3 p-5 text-sm text-slate-500">
-                    <span className="h-4 w-4 animate-spin rounded-full border-2 border-slate-700 border-t-blue-500" />
+                    <span className="h-4 w-4 animate-spin rounded-full border-2 border-border border-t-emerald-500" />
                     Loading candidates…
                   </div>
                 )}
@@ -512,7 +624,7 @@ export default function HomePage() {
                       <li
                         key={paper.id}
                         className={`flex gap-4 px-5 py-4 transition-colors ${
-                          paper.approved ? "bg-emerald-500/5" : "hover:bg-[#1a2236]"
+                          paper.approved ? "bg-emerald-500/5" : "hover:bg-surface-elevated"
                         }`}
                       >
                         <div className="pt-0.5">
@@ -533,7 +645,7 @@ export default function HomePage() {
                               target="_blank"
                               rel="noopener noreferrer"
                               onClick={(e) => e.stopPropagation()}
-                              className="hover:text-blue-400 hover:underline underline-offset-2 transition-colors"
+                              className="hover:text-emerald-400 hover:underline underline-offset-2 transition-colors"
                             >
                               {paper.title}
                               <svg className="ml-1 inline h-3 w-3 text-slate-600" viewBox="0 0 12 12" fill="none">
@@ -582,7 +694,13 @@ export default function HomePage() {
 
           {/* ── DONE ────────────────────────────────────────────────────── */}
           {view === "done" && (() => {
+            const draftingDone = completedPhase === "drafting";
             const synthesisDone = completedPhase === "synthesis";
+            const headline = draftingDone
+              ? "Manuscript complete — all sections approved"
+              : synthesisDone
+                ? "Phase 2 complete — synthesis approved"
+                : "Phase 1 complete";
             return (
             <div className="animate-fade-in space-y-4">
               <div className="rounded-xl border border-emerald-500/20 bg-emerald-500/5 glow-green overflow-hidden">
@@ -593,12 +711,17 @@ export default function HomePage() {
                     </svg>
                   </div>
                   <p className="text-sm font-semibold text-emerald-300">
-                    {synthesisDone ? "Phase 2 complete — synthesis approved" : "Phase 1 complete"}
+                    {headline}
                   </p>
                 </div>
                 <div className="px-5 py-4 space-y-4">
                   <p className="text-sm text-slate-400">
-                    {synthesisDone ? (
+                    {draftingDone ? (
+                      <>
+                        Every section has been reviewed and approved. The full manuscript
+                        is rendered below — download it as Markdown.
+                      </>
+                    ) : synthesisDone ? (
                       <>
                         The literature synthesis is approved and locked. Phase 4 (Drafting)
                         will begin when the Scribe agent is enabled.
@@ -612,7 +735,7 @@ export default function HomePage() {
                   </p>
 
                   {/* Phase 1: approved papers summary */}
-                  {!synthesisDone && papers.filter((p) => p.approved).length > 0 && (
+                  {!synthesisDone && !draftingDone && papers.filter((p) => p.approved).length > 0 && (
                     <ul className="space-y-1.5">
                       {papers.filter((p) => p.approved).map((p) => (
                         <li key={p.id} className="flex items-start gap-2 text-xs text-slate-400">
@@ -621,7 +744,7 @@ export default function HomePage() {
                             href={paperSourceUrl(p)}
                             target="_blank"
                             rel="noopener noreferrer"
-                            className="hover:text-blue-400 hover:underline underline-offset-2 transition-colors line-clamp-1"
+                            className="hover:text-emerald-400 hover:underline underline-offset-2 transition-colors line-clamp-1"
                           >
                             {p.title}
                           </a>
@@ -640,6 +763,40 @@ export default function HomePage() {
                     <SynthesisReadOnly matrix={matrix} summary={summary} papers={papers} />
                   )}
 
+                  {/* Phase 4: assembled manuscript + download. */}
+                  {draftingDone && manuscript && (
+                    <div className="space-y-3">
+                      <div className="flex items-center justify-between">
+                        <p className="text-xs font-semibold uppercase tracking-wider text-slate-400">
+                          Final manuscript
+                        </p>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            const blob = new Blob([manuscript.content], { type: "text/markdown" });
+                            const url = URL.createObjectURL(blob);
+                            const a = document.createElement("a");
+                            a.href = url;
+                            a.download = `${(title || "manuscript").replace(/[^\w.-]+/g, "_")}.md`;
+                            document.body.appendChild(a);
+                            a.click();
+                            a.remove();
+                            URL.revokeObjectURL(url);
+                          }}
+                          className="flex items-center gap-1.5 rounded-lg border border-emerald-500/30 bg-emerald-500/10 px-3 py-1.5 text-xs font-medium text-emerald-300 transition-all hover:bg-emerald-500/20"
+                        >
+                          <svg className="h-3 w-3" viewBox="0 0 16 16" fill="none">
+                            <path d="M8 2v9m0 0l-3-3m3 3l3-3M3 13h10" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+                          </svg>
+                          Download .md
+                        </button>
+                      </div>
+                      <div className="max-h-[60vh] overflow-y-auto rounded-lg border border-border bg-background p-4">
+                        <Markdown content={manuscript.content} />
+                      </div>
+                    </div>
+                  )}
+
                   <AgentLog lines={logLines} endRef={logEndRef} />
 
                   <button
@@ -648,6 +805,7 @@ export default function HomePage() {
                       setView("idle"); setCtx(null); setLogLines([]);
                       setPapers([]); setTitle(""); setSeedQuery("");
                       setMatrix(null); setSummary(null); setCompletedPhase(null);
+                      setSectionArtifact(null); setCurrentSection(null); setManuscript(null);
                       wsRef.current?.close();
                     }}
                     className="rounded-lg border border-emerald-500/30 bg-emerald-500/10 px-4 py-2 text-sm font-medium text-emerald-400 transition-all hover:bg-emerald-500/20"
@@ -661,8 +819,55 @@ export default function HomePage() {
           })()}
 
           {/* ── ERROR ───────────────────────────────────────────────────── */}
-          {view === "error" && (
-            <div className="animate-fade-in rounded-xl border border-red-500/20 bg-red-500/5 overflow-hidden">
+          {view === "error" && error?.kind === "conflict" && (
+            // M3-C: phase-conflict banner. Distinct from the generic red
+            // error: amber border + explicit "the workflow advanced —
+            // refresh to continue" copy. Non-dismissable (no Try again
+            // button) because retrying the same action would just hit
+            // the same 409 — the user must reload the project state.
+            <div className="animate-fade-in glow-amber overflow-hidden rounded-xl border border-amber-500/30 bg-amber-500/5">
+              <div className="flex items-center gap-3 border-b border-amber-500/30 px-5 py-4">
+                <div className="flex h-7 w-7 items-center justify-center rounded-full bg-amber-500/20">
+                  <svg
+                    className="h-3.5 w-3.5 text-amber-400"
+                    viewBox="0 0 16 16"
+                    fill="none"
+                  >
+                    <path
+                      d="M8 3v6M8 12v.5"
+                      stroke="currentColor"
+                      strokeWidth="1.5"
+                      strokeLinecap="round"
+                    />
+                    <circle cx="8" cy="8" r="6" stroke="currentColor" strokeWidth="1.5" />
+                  </svg>
+                </div>
+                <p className="text-sm font-semibold text-amber-300">
+                  Workflow phase already advanced
+                </p>
+              </div>
+              <div className="space-y-3 px-5 py-4">
+                <p className="text-sm text-slate-300">
+                  {error.message}
+                </p>
+                <p className="text-xs text-slate-500">
+                  The workflow moved past this gate while your tab was open. Reload the
+                  page to fetch the latest project state.
+                </p>
+                <button
+                  type="button"
+                  onClick={() => {
+                    if (typeof window !== "undefined") window.location.reload();
+                  }}
+                  className="rounded-lg border border-amber-500/30 bg-amber-500/10 px-4 py-2 text-sm font-medium text-amber-300 transition-all hover:bg-amber-500/20"
+                >
+                  Reload
+                </button>
+              </div>
+            </div>
+          )}
+          {view === "error" && error?.kind !== "conflict" && (
+            <div className="animate-fade-in overflow-hidden rounded-xl border border-red-500/20 bg-red-500/5">
               <div className="flex items-center gap-3 border-b border-red-500/20 px-5 py-4">
                 <div className="flex h-7 w-7 items-center justify-center rounded-full bg-red-500/20">
                   <svg className="h-3.5 w-3.5 text-red-400" viewBox="0 0 16 16" fill="none">
@@ -673,7 +878,7 @@ export default function HomePage() {
                 <p className="text-sm font-semibold text-red-300">Something went wrong</p>
               </div>
               <div className="px-5 py-4 space-y-4">
-                {error && <p className="text-sm text-slate-400">{error}</p>}
+                {error && <p className="text-sm text-slate-400">{error.message}</p>}
                 <button
                   type="button"
                   onClick={() => {
@@ -693,7 +898,7 @@ export default function HomePage() {
       </main>
 
       {/* ── Footer ──────────────────────────────────────────────────────── */}
-      <footer className="border-t border-[#1e2d45] px-6 py-3 text-center text-xs text-slate-700">
+      <footer className="border-t border-border px-6 py-3 text-center text-xs text-slate-700">
         ResearchFlow AI · Discovery + Synthesis · Human-in-the-loop research automation
       </footer>
     </div>
@@ -707,8 +912,8 @@ export default function HomePage() {
 function AgentLog({ lines, endRef }: { lines: string[]; endRef: React.RefObject<HTMLDivElement> }) {
   if (lines.length === 0) return null;
   return (
-    <div className="rounded-xl border border-[#1e2d45] bg-[#0a0f1e] overflow-hidden">
-      <div className="flex items-center gap-2 border-b border-[#1e2d45] px-4 py-2">
+    <div className="rounded-xl border border-border bg-background overflow-hidden">
+      <div className="flex items-center gap-2 border-b border-border px-4 py-2">
         <span className="h-2 w-2 rounded-full bg-red-500/60" />
         <span className="h-2 w-2 rounded-full bg-amber-500/60" />
         <span className="h-2 w-2 rounded-full bg-emerald-500/60" />
@@ -723,7 +928,7 @@ function AgentLog({ lines, endRef }: { lines: string[]; endRef: React.RefObject<
             <div
               key={i}
               className={`font-mono text-xs leading-relaxed ${
-                isStart ? "text-blue-400"
+                isStart ? "text-emerald-300/70"
                 : isDone ? "text-emerald-400"
                 : isError ? "text-red-400"
                 : "text-slate-500"

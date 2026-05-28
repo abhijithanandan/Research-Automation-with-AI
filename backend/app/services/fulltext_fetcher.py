@@ -195,6 +195,22 @@ class FullTextFetcher:
                 error=str(exc),
             )
             return None
+
+        # M3-B: declared content-type filter. Some publishers serve a 200
+        # OK with a paywall HTML interstitial when the user isn't
+        # authenticated — Content-Type=text/html. Bail before reading the
+        # body so we don't waste bytes on something we can't parse.
+        ctype = (resp.headers.get("content-type") or "").lower()
+        if ctype and not (
+            ctype.startswith("application/pdf") or ctype.startswith("application/octet-stream")
+        ):
+            _log.info(
+                "fulltext_wrong_content_type",
+                citation_key=citation_key,
+                content_type=ctype.split(";", 1)[0],
+            )
+            return None
+
         content = resp.content
         if not content:
             return None
@@ -205,8 +221,10 @@ class FullTextFetcher:
                 bytes=len(content),
             )
             return None
-        # Cheap sniff — PDFs start with the literal "%PDF" header. If the URL
-        # redirected to an HTML interstitial we bail rather than embed garbage.
+        # Cheap sniff — PDFs start with the literal "%PDF" header. Even if
+        # the server lied about content-type, this still catches non-PDF
+        # bodies before they reach pypdf. Defense in depth alongside the
+        # content-type filter above.
         if not content.startswith(b"%PDF"):
             _log.info(
                 "fulltext_not_a_pdf",

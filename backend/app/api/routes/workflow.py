@@ -5,10 +5,11 @@ from __future__ import annotations
 from typing import Literal
 from uuid import UUID
 
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field
 
 from app.api.deps import CurrentUser, DbSession
+from app.api.rate_limit import rate_limit
 from app.models.db import ProjectRow
 from app.models.schemas import WorkflowRun
 from app.services import workflow as wf_svc
@@ -45,7 +46,14 @@ class OverridePayload(BaseModel):
     mime_type: str = Field(default="text/markdown", max_length=_MAX_MIME_CHARS)
 
 
-@router.post("/start", response_model=WorkflowRun)
+@router.post(
+    "/start",
+    response_model=WorkflowRun,
+    # M1-C: workflow starts kick off background Librarian/Critic agent
+    # calls. Cap to 10/min/user so a runaway client can't soak Gemini
+    # quota or saturate the asyncio task pool.
+    dependencies=[Depends(rate_limit("workflow.start", max_per_window=10))],
+)
 async def start_workflow(project_id: UUID, user: CurrentUser, db: DbSession) -> WorkflowRun:
     """Start or resume the workflow for a project."""
     await _assert_project_owned(db, project_id, user.id)

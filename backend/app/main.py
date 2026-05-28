@@ -44,6 +44,19 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
             f"Refusing to start with APP_ENV='{settings.app_env}'."
         )
 
+    # Boot-time security posture row — every start is recorded so a future
+    # audit can prove what the running app's auth config actually was
+    # (M1-B). Token cap + cors origins are surfaced because a misconfigured
+    # CORS origin is a common XSS-adjacent footgun.
+    _log.info(
+        "app.start",
+        app_env=settings.app_env,
+        dev_auth_bypass=settings.dev_auth_bypass,
+        cors_origins=settings.cors_origins_list,
+        llm_provider=settings.llm_provider,
+        llm_model=settings.llm_model,
+    )
+
     async def _cleanup_orphaned_runs() -> None:
         try:
             async with get_session() as session:
@@ -54,7 +67,13 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
                 )
             _log.info("cleaned_up_orphaned_workflow_runs")
         except Exception as exc:
-            _log.warning("failed_to_cleanup_orphaned_runs", error=str(exc))
+            # Structured field per M1-D — log the exception class so log
+            # consumers can group failures without parsing free-form text.
+            _log.warning(
+                "failed_to_cleanup_orphaned_runs",
+                error_type=type(exc).__name__,
+                error=str(exc),
+            )
 
     # Run cleanup before graph initialization
     await _cleanup_orphaned_runs()
@@ -120,6 +139,12 @@ def create_app() -> FastAPI:
         allow_methods=["*"],
         allow_headers=["*"],
     )
+
+    # Body-size cap (M1-C). Mounted *before* the routers so unauthenticated
+    # peers can't soak memory by sending a 5 GiB JSON blob.
+    from app.api.middleware import BodySizeLimitMiddleware
+
+    app.add_middleware(BodySizeLimitMiddleware)
 
     api_prefix = "/api/v1"
     app.include_router(health.router, prefix=api_prefix)

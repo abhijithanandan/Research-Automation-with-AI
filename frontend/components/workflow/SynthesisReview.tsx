@@ -4,6 +4,7 @@ import { useMemo, useState } from "react";
 
 import { diffLines, diffStats, type DiffOp } from "@/components/workflow/diffLines";
 import { Markdown } from "@/components/workflow/Markdown";
+import { MatrixModal } from "@/components/workflow/MatrixModal";
 import type { Artifact, Paper } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
@@ -11,7 +12,9 @@ import { cn } from "@/lib/utils";
 // Matrix shape — mirrors backend app/agents/critic.py MatrixModel / PaperExtraction
 // ---------------------------------------------------------------------------
 
-interface PaperRow {
+// Re-exported so MatrixModal can build a typed Map<string, Paper> + render
+// the same `MatrixTable` without duplicating the shape definitions.
+export interface PaperRow {
   citation_key: string;
   problem: string;
   method: string;
@@ -22,11 +25,11 @@ interface PaperRow {
   error: string | null;
 }
 
-interface MatrixModel {
+export interface MatrixModel {
   rows: PaperRow[];
 }
 
-const MATRIX_COLUMNS: { key: keyof PaperRow; label: string }[] = [
+export const MATRIX_COLUMNS: { key: keyof PaperRow; label: string }[] = [
   { key: "problem", label: "Problem" },
   { key: "method", label: "Method" },
   { key: "dataset", label: "Dataset" },
@@ -34,7 +37,7 @@ const MATRIX_COLUMNS: { key: keyof PaperRow; label: string }[] = [
   { key: "limitations", label: "Limitations" },
 ];
 
-function parseMatrix(content: string): MatrixModel | null {
+export function parseMatrix(content: string): MatrixModel | null {
   try {
     const parsed = JSON.parse(content) as unknown;
     if (
@@ -191,6 +194,9 @@ export function SynthesisReview({
   const [editContent, setEditContent] = useState("");
   // Override mode shows three sub-views: raw editor, diff vs original, preview.
   const [editView, setEditView] = useState<EditView>("edit");
+  // Fullscreen matrix view — mounts MatrixModal into document.body so the
+  // table can use the full monitor width instead of the page's max-w cap.
+  const [matrixExpanded, setMatrixExpanded] = useState(false);
 
   const parsedMatrix = useMemo(
     () => (matrix ? parseMatrix(matrix.content) : null),
@@ -252,8 +258,8 @@ export function SynthesisReview({
   // ── Loading ───────────────────────────────────────────────────────────
   if (loading) {
     return (
-      <div className="flex items-center gap-3 rounded-xl border border-[#1e2d45] bg-[#111827] px-5 py-4 text-sm text-slate-500">
-        <span className="h-4 w-4 animate-spin rounded-full border-2 border-slate-700 border-t-violet-500" />
+      <div className="flex items-center gap-3 rounded-xl border border-border bg-background px-5 py-4 text-sm text-slate-500">
+        <span className="h-4 w-4 animate-spin rounded-full border-2 border-border border-t-emerald-500" />
         Loading the literature synthesis…
       </div>
     );
@@ -262,7 +268,7 @@ export function SynthesisReview({
   // ── Empty (artifacts not yet available) ───────────────────────────────
   if (!matrix && !summary) {
     return (
-      <div className="flex flex-col items-center gap-2 rounded-xl border border-[#1e2d45] bg-[#111827] py-10 text-center">
+      <div className="flex flex-col items-center gap-2 rounded-xl border border-border bg-background py-10 text-center">
         <span className="text-2xl">🧪</span>
         <p className="text-sm text-slate-500">No synthesis artifacts yet.</p>
         <p className="text-xs text-slate-600">The Critic may still be working.</p>
@@ -273,12 +279,12 @@ export function SynthesisReview({
   return (
     <div className="space-y-4 animate-fade-in">
       {/* ── Synthesis card ─────────────────────────────────────────────── */}
-      <div className="overflow-hidden rounded-xl border border-violet-500/20 bg-[#111827]">
+      <div className="overflow-hidden rounded-xl border border-emerald-500/20 bg-background">
         {/* Header */}
-        <div className="flex items-center justify-between border-b border-[#1e2d45] px-5 py-4">
+        <div className="flex items-center justify-between border-b border-border px-5 py-4">
           <div>
             <h2 className="flex items-center gap-2 text-sm font-semibold text-slate-200">
-              <span className="flex h-5 w-5 items-center justify-center rounded bg-violet-500/20 text-[10px] text-violet-300">
+              <span className="flex h-5 w-5 items-center justify-center rounded bg-emerald-500/20 text-[10px] text-emerald-300">
                 02
               </span>
               Literature synthesis
@@ -330,7 +336,7 @@ export function SynthesisReview({
         )}
 
         {/* Tabs */}
-        <div className="flex gap-1 border-b border-[#1e2d45] px-3 pt-3">
+        <div className="flex gap-1 border-b border-border px-3 pt-3">
           <TabButton active={tab === "narrative"} onClick={() => setTab("narrative")}>
             Narrative
           </TabButton>
@@ -357,7 +363,30 @@ export function SynthesisReview({
 
           {tab === "matrix" &&
             (parsedMatrix && parsedMatrix.rows.length > 0 ? (
-              <MatrixTable rows={parsedMatrix.rows} paperByKey={paperByKey} />
+              <div className="space-y-3">
+                {/* Expand button — pops the matrix into a fullscreen portal
+                    so the user can read the table without the page's
+                    max-w cap squeezing it into nested scrollbars. */}
+                <div className="flex items-center justify-end">
+                  <button
+                    type="button"
+                    onClick={() => setMatrixExpanded(true)}
+                    className="flex items-center gap-1.5 rounded-md border border-primary/40 bg-primary/10 px-3 py-1.5 text-xs font-medium text-primary transition-colors hover:border-primary hover:bg-primary/20"
+                    aria-label="Expand matrix to fullscreen"
+                  >
+                    <svg className="h-3 w-3" viewBox="0 0 16 16" fill="none">
+                      <path
+                        d="M2 6V2h4M14 6V2h-4M2 10v4h4M14 10v4h-4"
+                        stroke="currentColor"
+                        strokeWidth="1.5"
+                        strokeLinecap="round"
+                      />
+                    </svg>
+                    Expand to fullscreen
+                  </button>
+                </div>
+                <MatrixTable rows={parsedMatrix.rows} paperByKey={paperByKey} />
+              </div>
             ) : (
               <p className="text-sm text-slate-500">
                 The comparison matrix could not be parsed.
@@ -366,11 +395,21 @@ export function SynthesisReview({
         </div>
       </div>
 
+      {/* Fullscreen matrix modal — only mounted when expanded. The component
+          itself short-circuits the portal render when open=false so leaving
+          it in the tree is cheap. */}
+      <MatrixModal
+        matrix={parsedMatrix}
+        paperByKey={paperByKey}
+        open={matrixExpanded}
+        onClose={() => setMatrixExpanded(false)}
+      />
+
       {/* ── Approval panel ─────────────────────────────────────────────── */}
-      <div className="overflow-hidden rounded-xl border border-amber-500/20 bg-amber-500/5 glow-amber">
-        <div className="flex items-center gap-3 border-b border-amber-500/20 px-5 py-4">
-          <span className="flex h-2 w-2 rounded-full bg-amber-400 animate-pulse-dot" />
-          <p className="text-sm font-semibold text-amber-300">Review the synthesis</p>
+      <div className="glow-emerald overflow-hidden rounded-xl border border-emerald-700/40 bg-emerald-800/10">
+        <div className="flex items-center gap-3 border-b border-emerald-700/40 px-5 py-4">
+          <span className="animate-pulse-dot flex h-2 w-2 rounded-full bg-emerald-400" />
+          <p className="text-sm font-semibold text-emerald-300">Review the synthesis</p>
         </div>
 
         <div className="space-y-4 px-5 py-4">
@@ -412,7 +451,7 @@ export function SynthesisReview({
                   type="button"
                   onClick={() => setAction("reject")}
                   disabled={busy}
-                  className="flex items-center gap-2 rounded-lg border border-amber-500/30 bg-amber-500/10 px-4 py-2 text-sm font-medium text-amber-400 transition-all hover:border-amber-500/50 hover:bg-amber-500/20 disabled:cursor-not-allowed disabled:opacity-40"
+                  className="flex items-center gap-2 rounded-lg border border-emerald-700/40 bg-emerald-800/10 px-4 py-2 text-sm font-medium text-emerald-300 transition-all hover:border-emerald-700/60 hover:bg-emerald-800/20 disabled:cursor-not-allowed disabled:opacity-40"
                 >
                   <svg className="h-3.5 w-3.5" viewBox="0 0 16 16" fill="none">
                     <path
@@ -452,7 +491,7 @@ export function SynthesisReview({
                 Feedback for the Critic
               </label>
               <textarea
-                className="w-full rounded-lg border border-slate-700 bg-slate-900/80 p-3 text-sm text-slate-200 placeholder-slate-600 transition-colors focus:border-amber-500/50 focus:outline-none focus:ring-1 focus:ring-amber-500/30"
+                className="w-full rounded-lg border border-border bg-slate-900/80 p-3 text-sm text-slate-200 placeholder-slate-600 transition-colors focus:border-emerald-700/60 focus:outline-none focus:ring-1 focus:ring-emerald-700/30"
                 rows={3}
                 placeholder="e.g. Group the synthesis by application domain, not by method…"
                 value={feedback}
@@ -464,7 +503,7 @@ export function SynthesisReview({
                   type="button"
                   onClick={handleRejectSubmit}
                   disabled={busy || !feedback.trim()}
-                  className="rounded-lg border border-amber-500/30 bg-amber-500/10 px-4 py-2 text-sm font-medium text-amber-400 transition-all hover:bg-amber-500/20 disabled:cursor-not-allowed disabled:opacity-40"
+                  className="rounded-lg border border-emerald-700/40 bg-emerald-800/10 px-4 py-2 text-sm font-medium text-emerald-300 transition-all hover:border-emerald-700/60 hover:bg-emerald-800/20 disabled:cursor-not-allowed disabled:opacity-40"
                 >
                   {busy ? "Working…" : "Submit & regenerate"}
                 </button>
@@ -475,7 +514,7 @@ export function SynthesisReview({
                     setFeedback("");
                   }}
                   disabled={busy}
-                  className="rounded-lg border border-slate-700 px-4 py-2 text-sm font-medium text-slate-400 transition-all hover:bg-slate-800 disabled:opacity-40"
+                  className="rounded-lg border border-border px-4 py-2 text-sm font-medium text-slate-400 transition-all hover:bg-slate-800 disabled:opacity-40"
                 >
                   Cancel
                 </button>
@@ -494,7 +533,7 @@ export function SynthesisReview({
               </p>
 
               {/* View toggle: raw editor / diff vs original / rendered preview */}
-              <div className="flex items-center justify-between gap-2 border-b border-slate-700/60 pb-2">
+              <div className="flex items-center justify-between gap-2 border-b border-border/60 pb-2">
                 <div className="flex gap-1">
                   <EditViewButton active={editView === "edit"} onClick={() => setEditView("edit")}>
                     Edit
@@ -524,7 +563,7 @@ export function SynthesisReview({
                       Markdown source
                     </label>
                     <textarea
-                      className="h-72 w-full rounded-lg border border-slate-700 bg-slate-900/80 p-3 font-mono text-xs leading-relaxed text-slate-200 placeholder-slate-600 transition-colors focus:border-blue-500/50 focus:outline-none focus:ring-1 focus:ring-blue-500/30"
+                      className="h-72 w-full rounded-lg border border-border bg-slate-900/80 p-3 font-mono text-xs leading-relaxed text-slate-200 placeholder-slate-600 transition-colors focus:border-emerald-500/60 focus:outline-none focus:ring-1 focus:ring-emerald-500/30"
                       value={editContent}
                       onChange={(e) => setEditContent(e.target.value)}
                       autoFocus
@@ -534,7 +573,7 @@ export function SynthesisReview({
                     <label className="block text-xs font-medium uppercase tracking-wider text-slate-400">
                       Live preview
                     </label>
-                    <div className="h-72 overflow-y-auto rounded-lg border border-slate-700 bg-[#0a0f1e] p-3">
+                    <div className="h-72 overflow-y-auto rounded-lg border border-border bg-background p-3">
                       {editContent.trim() ? (
                         <Markdown content={editContent} />
                       ) : (
@@ -548,7 +587,7 @@ export function SynthesisReview({
               {editView === "diff" && <DiffPane ops={diffOps} />}
 
               {editView === "preview" && (
-                <div className="h-96 overflow-y-auto rounded-lg border border-slate-700 bg-[#0a0f1e] p-4">
+                <div className="h-96 overflow-y-auto rounded-lg border border-border bg-background p-4">
                   {editContent.trim() ? (
                     <Markdown content={editContent} />
                   ) : (
@@ -562,7 +601,7 @@ export function SynthesisReview({
                   type="button"
                   onClick={handleOverrideSubmit}
                   disabled={busy || !editContent.trim()}
-                  className="rounded-lg border border-blue-500/30 bg-blue-500/10 px-4 py-2 text-sm font-medium text-blue-400 transition-all hover:bg-blue-500/20 disabled:cursor-not-allowed disabled:opacity-40"
+                  className="rounded-lg border border-emerald-500/40 bg-emerald-500/10 px-4 py-2 text-sm font-medium text-emerald-300 transition-all hover:bg-emerald-500/20 disabled:cursor-not-allowed disabled:opacity-40"
                 >
                   {busy ? "Working…" : "Save & approve"}
                 </button>
@@ -573,7 +612,7 @@ export function SynthesisReview({
                     setEditContent("");
                   }}
                   disabled={busy}
-                  className="rounded-lg border border-slate-700 px-4 py-2 text-sm font-medium text-slate-400 transition-all hover:bg-slate-800 disabled:opacity-40"
+                  className="rounded-lg border border-border px-4 py-2 text-sm font-medium text-slate-400 transition-all hover:bg-slate-800 disabled:opacity-40"
                 >
                   Cancel
                 </button>
@@ -606,7 +645,7 @@ function TabButton({
       className={cn(
         "rounded-t-lg px-3.5 py-2 text-xs font-medium transition-colors",
         active
-          ? "bg-violet-500/10 text-violet-300 ring-1 ring-inset ring-violet-500/20"
+          ? "bg-emerald-500/10 text-emerald-300 ring-1 ring-inset ring-emerald-500/20"
           : "text-slate-500 hover:text-slate-300",
       )}
     >
@@ -632,7 +671,7 @@ function EditViewButton({
       className={cn(
         "rounded-md px-2.5 py-1 text-[11px] font-medium uppercase tracking-wider transition-colors",
         active
-          ? "bg-blue-500/15 text-blue-300 ring-1 ring-inset ring-blue-500/30"
+          ? "bg-emerald-500/15 text-emerald-300 ring-1 ring-inset ring-emerald-500/30"
           : "text-slate-500 hover:text-slate-300",
       )}
     >
@@ -645,19 +684,19 @@ function EditViewButton({
 function DiffPane({ ops }: { ops: DiffOp[] }) {
   if (ops.length === 0) {
     return (
-      <p className="rounded-lg border border-slate-700 bg-[#0a0f1e] px-4 py-6 text-center text-xs text-slate-500">
+      <p className="rounded-lg border border-border bg-background px-4 py-6 text-center text-xs text-slate-500">
         Nothing to compare yet.
       </p>
     );
   }
   return (
-    <div className="h-96 overflow-y-auto rounded-lg border border-slate-700 bg-[#0a0f1e] font-mono text-[11px] leading-relaxed">
+    <div className="h-96 overflow-y-auto rounded-lg border border-border bg-background font-mono text-[11px] leading-relaxed">
       {ops.map((op, i) => {
         if (op.type === "keep") {
           return (
             <div
               key={i}
-              className="flex gap-3 border-b border-slate-800/40 px-3 py-0.5 text-slate-500"
+              className="flex gap-3 border-b border-border px-3 py-0.5 text-slate-500"
             >
               <span className="w-3 shrink-0 text-slate-700"> </span>
               <span className="whitespace-pre-wrap break-words">
@@ -670,7 +709,7 @@ function DiffPane({ ops }: { ops: DiffOp[] }) {
           return (
             <div
               key={i}
-              className="flex gap-3 border-b border-slate-800/40 bg-emerald-500/10 px-3 py-0.5 text-emerald-300"
+              className="flex gap-3 border-b border-border bg-emerald-500/10 px-3 py-0.5 text-emerald-300"
             >
               <span className="w-3 shrink-0 select-none text-emerald-500">+</span>
               <span className="whitespace-pre-wrap break-words">
@@ -682,7 +721,7 @@ function DiffPane({ ops }: { ops: DiffOp[] }) {
         return (
           <div
             key={i}
-            className="flex gap-3 border-b border-slate-800/40 bg-red-500/10 px-3 py-0.5 text-red-300/90"
+            className="flex gap-3 border-b border-border bg-red-500/10 px-3 py-0.5 text-red-300/90"
           >
             <span className="w-3 shrink-0 select-none text-red-500">−</span>
             <span className="whitespace-pre-wrap break-words line-through decoration-red-500/40">
@@ -713,7 +752,7 @@ function PaperIdentity({
           paper?.year ? ` · ${paper.year}` : ""
         }`
       : null;
-  const keyClass = accent === "violet" ? "text-violet-300" : "text-amber-300";
+  const keyClass = accent === "violet" ? "text-emerald-300" : "text-amber-300";
 
   return (
     <div className="space-y-1">
@@ -729,7 +768,7 @@ function PaperIdentity({
   );
 }
 
-function MatrixTable({
+export function MatrixTable({
   rows,
   paperByKey,
 }: {
@@ -743,7 +782,7 @@ function MatrixTable({
     <div className="space-y-3">
       {/* Comparison grid — only the papers that extracted cleanly. */}
       {okRows.length > 0 ? (
-        <div className="overflow-x-auto rounded-lg border border-[#1e2d45]">
+        <div className="overflow-x-auto rounded-lg border border-border">
           <table className="w-full table-fixed border-collapse text-xs">
             <colgroup>
               <col className="w-56" />
@@ -752,14 +791,14 @@ function MatrixTable({
               ))}
             </colgroup>
             <thead>
-              <tr className="bg-[#0a0f1e]">
-                <th className="sticky left-0 z-10 border-b border-r border-[#1e2d45] bg-[#0a0f1e] px-3 py-2.5 text-left font-semibold uppercase tracking-wider text-slate-400">
+              <tr className="bg-background">
+                <th className="sticky left-0 z-10 border-b border-r border-border bg-background px-3 py-2.5 text-left font-semibold uppercase tracking-wider text-slate-400">
                   Paper
                 </th>
                 {MATRIX_COLUMNS.map((col) => (
                   <th
                     key={col.key}
-                    className="border-b border-[#1e2d45] px-3 py-2.5 text-left font-semibold uppercase tracking-wider text-slate-400"
+                    className="border-b border-border px-3 py-2.5 text-left font-semibold uppercase tracking-wider text-slate-400"
                   >
                     {col.label}
                   </th>
@@ -770,9 +809,9 @@ function MatrixTable({
               {okRows.map((row, i) => (
                 <tr
                   key={row.citation_key || i}
-                  className="align-top transition-colors hover:bg-[#1a2236]"
+                  className="align-top transition-colors hover:bg-surface-elevated"
                 >
-                  <td className="sticky left-0 z-10 border-b border-r border-[#1a2236] bg-[#111827] px-3 py-3">
+                  <td className="sticky left-0 z-10 border-b border-r border-border bg-background px-3 py-3">
                     <PaperIdentity
                       citationKey={row.citation_key}
                       paper={paperByKey.get(row.citation_key)}
@@ -782,7 +821,7 @@ function MatrixTable({
                   {MATRIX_COLUMNS.map((col) => (
                     <td
                       key={col.key}
-                      className="border-b border-[#1a2236] px-3 py-3 leading-relaxed text-slate-400"
+                      className="border-b border-border px-3 py-3 leading-relaxed text-slate-400"
                     >
                       {String(row[col.key] || "—")}
                     </td>
@@ -793,7 +832,7 @@ function MatrixTable({
           </table>
         </div>
       ) : (
-        <p className="rounded-lg border border-[#1e2d45] bg-[#0a0f1e] px-4 py-6 text-center text-sm text-slate-500">
+        <p className="rounded-lg border border-border bg-background px-4 py-6 text-center text-sm text-slate-500">
           No papers were successfully extracted — the comparison grid is empty.
         </p>
       )}
@@ -853,9 +892,9 @@ const ERROR_KIND_STYLES: Record<
     dot: "bg-slate-400",
   },
   network: {
-    tag: "border-blue-500/30 bg-blue-500/10 text-blue-300",
+    tag: "border-emerald-500/30 bg-emerald-500/10 text-emerald-300",
     label: "Network error",
-    dot: "bg-blue-400",
+    dot: "bg-emerald-400",
   },
   unknown: {
     tag: "border-slate-500/30 bg-slate-500/10 text-slate-300",
@@ -913,6 +952,7 @@ export function SynthesisReadOnly({
   summary: Artifact | null;
   papers: Paper[];
 }) {
+  const [matrixExpanded, setMatrixExpanded] = useState(false);
   const parsedMatrix = useMemo(
     () => (matrix ? parseMatrix(matrix.content) : null),
     [matrix],
@@ -947,7 +987,7 @@ export function SynthesisReadOnly({
 
   if (!matrix && !summary) {
     return (
-      <p className="rounded-lg border border-[#1e2d45] bg-[#0a0f1e] px-4 py-6 text-center text-sm text-slate-500">
+      <p className="rounded-lg border border-border bg-background px-4 py-6 text-center text-sm text-slate-500">
         No synthesis artifacts to display.
       </p>
     );
@@ -960,7 +1000,7 @@ export function SynthesisReadOnly({
           <h3 className="mb-2 text-xs font-semibold uppercase tracking-wider text-slate-400">
             Comparison matrix
           </h3>
-          <div className="rounded-lg border border-[#1e2d45] bg-[#0a0f1e] px-4 py-4">
+          <div className="rounded-lg border border-border bg-background px-4 py-4">
             <Markdown content={matrixMarkdown} />
           </div>
         </section>
@@ -968,9 +1008,27 @@ export function SynthesisReadOnly({
         parsedMatrix &&
         parsedMatrix.rows.length > 0 && (
           <section>
-            <h3 className="mb-2 text-xs font-semibold uppercase tracking-wider text-slate-400">
-              Comparison matrix
-            </h3>
+            <div className="mb-2 flex items-center justify-between">
+              <h3 className="text-xs font-semibold uppercase tracking-wider text-slate-400">
+                Comparison matrix
+              </h3>
+              <button
+                type="button"
+                onClick={() => setMatrixExpanded(true)}
+                className="flex items-center gap-1.5 rounded-md border border-primary/40 bg-primary/10 px-3 py-1.5 text-xs font-medium text-primary transition-colors hover:border-primary hover:bg-primary/20"
+                aria-label="Expand matrix to fullscreen"
+              >
+                <svg className="h-3 w-3" viewBox="0 0 16 16" fill="none">
+                  <path
+                    d="M2 6V2h4M14 6V2h-4M2 10v4h4M14 10v4h-4"
+                    stroke="currentColor"
+                    strokeWidth="1.5"
+                    strokeLinecap="round"
+                  />
+                </svg>
+                Expand to fullscreen
+              </button>
+            </div>
             <MatrixTable rows={parsedMatrix.rows} paperByKey={paperByKey} />
           </section>
         )
@@ -981,11 +1039,18 @@ export function SynthesisReadOnly({
           <h3 className="mb-2 text-xs font-semibold uppercase tracking-wider text-slate-400">
             Narrative
           </h3>
-          <div className="rounded-lg border border-[#1e2d45] bg-[#0a0f1e] px-4 py-4">
+          <div className="rounded-lg border border-border bg-background px-4 py-4">
             <Markdown content={narrative} />
           </div>
         </section>
       )}
+
+      <MatrixModal
+        matrix={parsedMatrix}
+        paperByKey={paperByKey}
+        open={matrixExpanded}
+        onClose={() => setMatrixExpanded(false)}
+      />
     </div>
   );
 }

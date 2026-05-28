@@ -58,7 +58,19 @@ async def verify_firebase_token(token: str) -> dict[str, object]:
     settings = get_settings()
 
     if settings.dev_auth_bypass:
-        _log.warning("dev_auth_bypass_active", uid=token[:16])
+        # M1-D: log only the first 4 chars + redaction marker. In bypass
+        # mode the "token" is normally a short dev UID, but if anyone
+        # accidentally pastes a real Firebase JWT here, slicing 16 chars
+        # would still leak a prefix. 4 chars is enough to disambiguate
+        # two dev users in logs without leaking JWT structure. structlog
+        # reserves the positional first arg as the event name, so use it
+        # as the structured event id directly.
+        _log.warning(
+            "auth.dev_bypass",
+            actor=token[:4] + "***",
+            result="allowed",
+            reason_code="dev_auth_bypass_true",
+        )
         return {"uid": token, "email": f"{token}@bypass.dev"}
 
     _ensure_firebase_initialized()

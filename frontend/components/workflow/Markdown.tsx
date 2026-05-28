@@ -54,18 +54,18 @@ const COMPONENTS: Components = {
       return <code className={className}>{children}</code>;
     }
     return (
-      <code className="rounded bg-slate-800 px-1.5 py-0.5 font-mono text-[0.85em] text-blue-300">
+      <code className="rounded bg-slate-800 px-1.5 py-0.5 font-mono text-[0.85em] text-emerald-300">
         {children}
       </code>
     );
   },
   pre: ({ children }: MdProps) => (
-    <pre className="mb-3 overflow-x-auto rounded-lg border border-slate-700 bg-[#0a0f1e] p-3 font-mono text-xs leading-relaxed text-slate-300">
+    <pre className="mb-3 overflow-x-auto rounded-lg border border-border bg-background p-3 font-mono text-xs leading-relaxed text-slate-300">
       {children}
     </pre>
   ),
   ul: ({ children }: MdProps) => (
-    <ul className="mb-3 ml-5 list-disc space-y-1 text-sm text-slate-400 marker:text-blue-500/60">
+    <ul className="mb-3 ml-5 list-disc space-y-1 text-sm text-slate-400 marker:text-emerald-500/60">
       {children}
     </ul>
   ),
@@ -78,34 +78,34 @@ const COMPONENTS: Components = {
       href={href}
       target="_blank"
       rel="noopener noreferrer"
-      className="text-blue-400 underline decoration-blue-500/40 underline-offset-2 transition-colors hover:text-blue-300 hover:decoration-blue-400"
+      className="text-emerald-400 underline decoration-emerald-500/40 underline-offset-2 transition-colors hover:text-emerald-300 hover:decoration-emerald-400"
     >
       {children}
     </a>
   ),
   blockquote: ({ children }: MdProps) => (
-    <blockquote className="mb-3 border-l-2 border-blue-500/40 bg-blue-500/5 py-2 pl-3 text-sm italic text-slate-300">
+    <blockquote className="mb-3 border-l-2 border-emerald-500/40 bg-emerald-500/5 py-2 pl-3 text-sm italic text-slate-300">
       {children}
     </blockquote>
   ),
-  hr: () => <hr className="my-4 border-slate-700/60" />,
+  hr: () => <hr className="my-4 border-border/60" />,
   // GitHub-flavored tables — the entire reason this component exists.
   // Tailwind utility classes give us a scrollable, readable grid that matches
   // the MatrixTable aesthetic without a global table stylesheet.
   table: ({ children }: MdProps) => (
-    <div className="mb-3 overflow-x-auto rounded-lg border border-[#1e2d45]">
+    <div className="mb-3 overflow-x-auto rounded-lg border border-border">
       <table className="w-full border-collapse text-xs">{children}</table>
     </div>
   ),
-  thead: ({ children }: MdProps) => <thead className="bg-[#0a0f1e]">{children}</thead>,
+  thead: ({ children }: MdProps) => <thead className="bg-background">{children}</thead>,
   tbody: ({ children }: MdProps) => <tbody>{children}</tbody>,
   tr: ({ children }: MdProps) => (
-    <tr className="border-b border-[#1a2236] last:border-b-0 hover:bg-[#1a2236]">
+    <tr className="border-b border-border last:border-b-0 hover:bg-surface-elevated">
       {children}
     </tr>
   ),
   th: ({ children }: MdProps) => (
-    <th className="border-b border-[#1e2d45] px-3 py-2.5 text-left font-semibold uppercase tracking-wider text-slate-400">
+    <th className="border-b border-border px-3 py-2.5 text-left font-semibold uppercase tracking-wider text-slate-400">
       {children}
     </th>
   ),

@@ -161,19 +161,25 @@ def test_paper_lock_decision_table(state: str, phase: str, should_lock: bool) ->
 
 def test_ws_log_uses_error_type_not_message() -> None:
     """Source-level guard: the routes/websocket.py auth handler must not
-    write str(exc) into its log — only the exception class name."""
+    write str(exc) into its log — only the exception class name.
+
+    Note: M1-D renamed the structured event ids to a dotted namespace
+    (``ws.auth.recv_error`` etc.) so the canonical event marker is
+    different from the round-2 string. The invariant we still care about
+    is that ``error_type=type(exc).__name__`` is used and bare
+    ``str(exc)`` is NOT used in the WS auth path.
+    """
     import inspect
 
     from app.api.routes import websocket as ws_mod
 
     src = inspect.getsource(ws_mod)
-    # The redaction is "log only the type". The old bad pattern was
-    # `error=str(exc)` directly inside the auth-recv handler. Any future
-    # contributor restoring it should turn this test red.
-    assert "ws_auth_recv_error" in src
+    # M1-D-era event name (dotted namespace) — the file MUST emit a
+    # structured recv-error log line, whatever it's called.
+    assert "ws.auth.recv_error" in src or "ws_auth_recv_error" in src
     assert "error_type=type(exc).__name__" in src
     # And the bad pattern must not be present anywhere in that file.
-    assert 'ws_auth_recv_error", error=str(exc)' not in src
+    assert "error=str(exc)" not in src
 
 
 # ---------------------------------------------------------------------------

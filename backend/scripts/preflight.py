@@ -33,7 +33,11 @@ REQUIRED_MODULES: tuple[str, ...] = (
     "tenacity",
     "email_validator",
     "google.genai",
+    "anthropic",
     "pypdf",
+    "firebase_admin",
+    "asyncpg",
+    "psycopg",
     # Dev / test
     "pytest",
     "pytest_asyncio",
@@ -46,7 +50,27 @@ REQUIRED_MODULES: tuple[str, ...] = (
 )
 
 
+# Hard minimum Python version. SPEC.md §2.1 + BRD §7 — Python 3.11 baseline
+# (asyncio.TaskGroup, StrEnum, TypeAlias semantics). Newer is fine; older is
+# not (the type-hint syntax we use throughout breaks on 3.10).
+_MIN_PY: tuple[int, int] = (3, 11)
+
+
+def _check_python_version() -> str | None:
+    actual = sys.version_info[:2]
+    if actual < _MIN_PY:
+        return f"Python {_MIN_PY[0]}.{_MIN_PY[1]}+ required, got {actual[0]}.{actual[1]}"
+    return None
+
+
 def main() -> int:
+    py_error = _check_python_version()
+    if py_error is not None:
+        sys.stderr.write("\n========= PREFLIGHT FAILED =========\n")
+        sys.stderr.write(f"  {py_error}\n")
+        sys.stderr.write("\nUpgrade Python before continuing.\n")
+        return 1
+
     missing: list[tuple[str, str]] = []
     for mod in REQUIRED_MODULES:
         try:
@@ -62,7 +86,10 @@ def main() -> int:
             "If you are inside Docker, rebuild: docker compose build backend.\n"
         )
         return 1
-    print(f"preflight ok — {len(REQUIRED_MODULES)} required modules importable")
+    print(
+        f"preflight ok — python {sys.version_info[0]}.{sys.version_info[1]}, "
+        f"{len(REQUIRED_MODULES)} required modules importable"
+    )
     return 0
 
 

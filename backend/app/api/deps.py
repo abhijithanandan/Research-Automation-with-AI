@@ -58,7 +58,15 @@ async def get_current_user(
         from app.utils.logging import get_logger
 
         _log = get_logger(__name__)
-        _log.error("Authentication error validating token", exc_info=exc)
+        # M1-D: never log token content or full traceback frames here —
+        # those frames carry the JWT through them. Class name + structured
+        # security fields are enough for ops to triage.
+        _log.warning(
+            "http.auth.verify_failed",
+            result="rejected",
+            reason_code="verify_failed",
+            error_type=type(exc).__name__,
+        )
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid authentication credentials",

@@ -2,4 +2,9 @@
 # Pre-commit hook — runs lint-staged on the files you've staged.
 # Failures here mean your commit is rejected; fix the reported issues and re-stage.
 
+# M1-E: secret scan — fail the commit if a staged file matches an API-key
+# pattern. Runs first so the more expensive lint-staged step is skipped on
+# a guaranteed-fail commit.
+./scripts/check_secrets.sh
+
 npx --no-install lint-staged

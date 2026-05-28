@@ -318,7 +318,7 @@ All messages are JSON. Every event has a `type` and `ts` (ISO-8601). Client-boun
 | `agent.token` | `{ agent, run_id, delta }` | Streaming LLM token. High-frequency. |
 | `agent.completed` | `{ agent, run_id, artifact_ids }` | An agent finishes. |
 | `agent.error` | `{ agent, run_id, error }` | Agent failed (recoverable). |
-| `approval.required` | `{ phase, run_id, summary }` | Engine has paused awaiting human input. |
+| `approval.required` | `{ phase, run_id, summary, section? }` | Engine has paused awaiting human input. `section` is present only when `phase = "drafting"` and identifies which of the seven canonical sections is up for review (BRD §5.2 FR-2.4). |
 | `usage.tick` | `{ tokens_in, tokens_out, cost_usd }` | Periodic usage rollup (≤ every 5s). |
 | `cost.cap_warn` | `{ run_id, spend_usd, cap_usd, warn_pct }` | Project spend crossed `token_cap_warn_pct` of the cap (NFR-5). Advisory — the run continues. |
 | `cost.cap_exceeded` | `{ run_id, spend_usd, cap_usd }` | Project spend reached `token_cap_usd` (NFR-5). The run is moved to `error`; the user must raise the cap to continue. |

@@ -42,11 +42,11 @@ export function ApprovalPanel({ summary, busy, onApprove, onReject, onOverride }
   }
 
   return (
-    <div className="animate-fade-in overflow-hidden rounded-xl border border-amber-500/20 bg-amber-500/5 glow-amber">
+    <div className="animate-fade-in glow-emerald overflow-hidden rounded-xl border border-emerald-700/40 bg-emerald-800/10">
       {/* Header */}
-      <div className="flex items-center gap-3 border-b border-amber-500/20 px-5 py-4">
-        <span className="flex h-2 w-2 rounded-full bg-amber-400 animate-pulse-dot" />
-        <p className="text-sm font-semibold text-amber-300">Awaiting your approval</p>
+      <div className="flex items-center gap-3 border-b border-emerald-700/40 px-5 py-4">
+        <span className="animate-pulse-dot flex h-2 w-2 rounded-full bg-emerald-400" />
+        <p className="text-sm font-semibold text-emerald-300">Awaiting your approval</p>
       </div>
 
       <div className="px-5 py-4 space-y-4">
@@ -79,7 +79,7 @@ export function ApprovalPanel({ summary, busy, onApprove, onReject, onOverride }
               type="button"
               onClick={() => setAction("reject")}
               disabled={busy}
-              className="flex items-center gap-2 rounded-lg bg-amber-500/10 border border-amber-500/30 px-4 py-2 text-sm font-medium text-amber-400 transition-all hover:bg-amber-500/20 hover:border-amber-500/50 disabled:cursor-not-allowed disabled:opacity-40"
+              className="flex items-center gap-2 rounded-lg border border-emerald-700/40 bg-emerald-800/10 px-4 py-2 text-sm font-medium text-emerald-300 transition-all hover:border-emerald-700/60 hover:bg-emerald-800/20 disabled:cursor-not-allowed disabled:opacity-40"
             >
               <svg className="h-3.5 w-3.5" viewBox="0 0 16 16" fill="none">
                 <path d="M8 3v5M8 10v.5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"/>
@@ -107,7 +107,7 @@ export function ApprovalPanel({ summary, busy, onApprove, onReject, onOverride }
               Feedback for regeneration
             </label>
             <textarea
-              className="w-full rounded-lg border border-slate-700 bg-slate-900/80 p-3 text-sm text-slate-200 placeholder-slate-600 focus:border-amber-500/50 focus:outline-none focus:ring-1 focus:ring-amber-500/30 transition-colors"
+              className="w-full rounded-lg border border-border bg-slate-900/80 p-3 text-sm text-slate-200 placeholder-slate-600 focus:border-emerald-700/60 focus:outline-none focus:ring-1 focus:ring-emerald-700/30 transition-colors"
               rows={3}
               placeholder="Describe what the Librarian should change on the next run…"
               value={feedback}
@@ -119,7 +119,7 @@ export function ApprovalPanel({ summary, busy, onApprove, onReject, onOverride }
                 type="button"
                 onClick={handleRejectSubmit}
                 disabled={busy || !feedback.trim()}
-                className="rounded-lg bg-amber-500/10 border border-amber-500/30 px-4 py-2 text-sm font-medium text-amber-400 transition-all hover:bg-amber-500/20 disabled:cursor-not-allowed disabled:opacity-40"
+                className="rounded-lg border border-emerald-700/40 bg-emerald-800/10 px-4 py-2 text-sm font-medium text-emerald-300 transition-all hover:border-emerald-700/60 hover:bg-emerald-800/20 disabled:cursor-not-allowed disabled:opacity-40"
               >
                 {busy ? "Working…" : "Submit & regenerate"}
               </button>
@@ -127,7 +127,7 @@ export function ApprovalPanel({ summary, busy, onApprove, onReject, onOverride }
                 type="button"
                 onClick={() => { setAction("idle"); setFeedback(""); }}
                 disabled={busy}
-                className="rounded-lg border border-slate-700 px-4 py-2 text-sm font-medium text-slate-400 transition-all hover:bg-slate-800 disabled:opacity-40"
+                className="rounded-lg border border-border px-4 py-2 text-sm font-medium text-slate-400 transition-all hover:bg-slate-800 disabled:opacity-40"
               >
                 Cancel
               </button>
@@ -149,7 +149,7 @@ export function ApprovalPanel({ summary, busy, onApprove, onReject, onOverride }
                 </label>
                 <input
                   type="text"
-                  className="w-full rounded-lg border border-slate-700 bg-slate-900/80 p-2.5 text-sm text-slate-200 placeholder-slate-600 focus:border-blue-500/50 focus:outline-none focus:ring-1 focus:ring-blue-500/30 transition-colors"
+                  className="w-full rounded-lg border border-border bg-slate-900/80 p-2.5 text-sm text-slate-200 placeholder-slate-600 focus:border-emerald-500/60 focus:outline-none focus:ring-1 focus:ring-emerald-500/30 transition-colors"
                   placeholder="e.g. discovery-pool"
                   value={overrideLabel}
                   onChange={(e) => setOverrideLabel(e.target.value)}
@@ -160,7 +160,7 @@ export function ApprovalPanel({ summary, busy, onApprove, onReject, onOverride }
                   Kind
                 </label>
                 <select
-                  className="rounded-lg border border-slate-700 bg-slate-900/80 p-2.5 text-sm text-slate-200 focus:border-blue-500/50 focus:outline-none transition-colors"
+                  className="rounded-lg border border-border bg-slate-900/80 p-2.5 text-sm text-slate-200 focus:border-emerald-500/60 focus:outline-none transition-colors"
                   value={overrideKind}
                   onChange={(e) => setOverrideKind(e.target.value as OverridePayload["artifact_kind"])}
                 >
@@ -178,7 +178,7 @@ export function ApprovalPanel({ summary, busy, onApprove, onReject, onOverride }
                 Content
               </label>
               <textarea
-                className="w-full rounded-lg border border-slate-700 bg-slate-900/80 p-3 font-mono text-sm text-slate-200 placeholder-slate-600 focus:border-blue-500/50 focus:outline-none focus:ring-1 focus:ring-blue-500/30 transition-colors"
+                className="w-full rounded-lg border border-border bg-slate-900/80 p-3 font-mono text-sm text-slate-200 placeholder-slate-600 focus:border-emerald-500/60 focus:outline-none focus:ring-1 focus:ring-emerald-500/30 transition-colors"
                 rows={6}
                 placeholder="Paste or type the replacement content…"
                 value={overrideContent}
@@ -191,7 +191,7 @@ export function ApprovalPanel({ summary, busy, onApprove, onReject, onOverride }
                 type="button"
                 onClick={handleOverrideSubmit}
                 disabled={busy || !overrideContent.trim() || !overrideLabel.trim()}
-                className="rounded-lg bg-blue-500/10 border border-blue-500/30 px-4 py-2 text-sm font-medium text-blue-400 transition-all hover:bg-blue-500/20 disabled:cursor-not-allowed disabled:opacity-40"
+                className="rounded-lg border border-emerald-500/40 bg-emerald-500/10 px-4 py-2 text-sm font-medium text-emerald-300 transition-all hover:bg-emerald-500/20 disabled:cursor-not-allowed disabled:opacity-40"
               >
                 {busy ? "Working…" : "Submit override"}
               </button>
@@ -199,7 +199,7 @@ export function ApprovalPanel({ summary, busy, onApprove, onReject, onOverride }
                 type="button"
                 onClick={() => { setAction("idle"); setOverrideContent(""); setOverrideLabel(""); }}
                 disabled={busy}
-                className="rounded-lg border border-slate-700 px-4 py-2 text-sm font-medium text-slate-400 transition-all hover:bg-slate-800 disabled:opacity-40"
+                className="rounded-lg border border-border px-4 py-2 text-sm font-medium text-slate-400 transition-all hover:bg-slate-800 disabled:opacity-40"
               >
                 Cancel
               </button>

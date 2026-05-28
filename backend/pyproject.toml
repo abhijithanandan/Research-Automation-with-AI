@@ -28,6 +28,9 @@ dependencies = [
     "chromadb>=0.5",
     # Phase 1: Librarian agent dependencies
     "google-genai>=1.0",
+    # Anthropic Claude — alternative LLM provider (set LLM_PROVIDER=anthropic).
+    # The SDK is async-native, so we don't need asyncio.to_thread wrappers.
+    "anthropic>=0.40",
     "thefuzz>=0.22",
     "python-Levenshtein>=0.25",
     "tenacity>=8.3",
@@ -50,6 +53,9 @@ dev = [
     "respx>=0.21",
     "aiosqlite>=0.20",
     "jsonschema>=4.20",
+    # M4-A: dependency vulnerability scanner. Wired into run_ci_local.sh
+    # and the hardening gate; fails CI on HIGH/CRITICAL findings.
+    "pip-audit>=2.7",
 ]
 
 [build-system]

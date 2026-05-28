@@ -120,6 +120,18 @@ class PaperRow(Base):
 
 class ArtifactRow(Base):
     __tablename__ = "artifacts"
+    # Partial unique index: at most one manuscript per project. Section/
+    # matrix/summary artifacts are unconstrained — re-runs legitimately
+    # produce one row per iteration. Mirrors alembic 0005.
+    __table_args__ = (
+        Index(
+            "uq_artifacts_manuscript_per_project",
+            "project_id",
+            unique=True,
+            postgresql_where=text("kind = 'manuscript'"),
+            sqlite_where=text("kind = 'manuscript'"),
+        ),
+    )
 
     id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), primary_key=True, default=uuid4)
     project_id: Mapped[UUID] = mapped_column(
@@ -138,6 +150,21 @@ class ArtifactRow(Base):
 
 class AuditLogRow(Base):
     __tablename__ = "audit_log"
+    # M2-A: at most one phase_1.approved_pool audit row per workflow run.
+    # Partial unique — every other action (user.approve fires multiple
+    # times, section_ready fires seven times per run, etc.) is
+    # unconstrained.
+    __table_args__ = (
+        Index(
+            "uq_audit_pool_approval_per_run",
+            "workflow_run_id",
+            unique=True,
+            postgresql_where=text(
+                "action = 'phase_1.approved_pool' AND workflow_run_id IS NOT NULL"
+            ),
+            sqlite_where=text("action = 'phase_1.approved_pool' AND workflow_run_id IS NOT NULL"),
+        ),
+    )
 
     id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), primary_key=True, default=uuid4)
     project_id: Mapped[UUID] = mapped_column(

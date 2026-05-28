@@ -260,5 +260,11 @@ def test_preflight_lists_runtime_and_dev_modules() -> None:
         "langgraph.checkpoint",
         "email_validator",
         "pypdf",
+        # M1-A additions — the auth + LLM + DB layer must also be in preflight
+        # so a missing dep blows up before pytest collection.
+        "anthropic",
+        "firebase_admin",
+        "asyncpg",
+        "psycopg",
     }
     assert must_have.issubset(set(REQUIRED_MODULES))

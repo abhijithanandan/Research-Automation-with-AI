@@ -5,11 +5,12 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from uuid import UUID, uuid4
 
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field
 from sqlalchemy import select, update
 
 from app.api.deps import CurrentUser, DbSession
+from app.api.rate_limit import rate_limit
 from app.models.db import AuditLogRow, ProjectRow
 from app.models.schemas import Phase, Project
 
@@ -29,7 +30,14 @@ class UpdateProjectRequest(BaseModel):
     token_cap_usd: float | None = None
 
 
-@router.post("", response_model=Project, status_code=status.HTTP_201_CREATED)
+@router.post(
+    "",
+    response_model=Project,
+    status_code=status.HTTP_201_CREATED,
+    # M1-C: cap creation churn — one user spinning 1000 projects/min would
+    # blow up the candidate cache and the audit-log volume.
+    dependencies=[Depends(rate_limit("project.create", max_per_window=30))],
+)
 async def create_project(
     payload: CreateProjectRequest, user: CurrentUser, db: DbSession
 ) -> Project:

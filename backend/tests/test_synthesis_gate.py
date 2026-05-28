@@ -138,39 +138,68 @@ async def test_synthesis_override_replaces_summary_as_canonical_output() -> None
         "created_at": "2026-05-23T00:00:00+00:00",
     }
 
-    with patch("app.graph.workflow.Librarian") as mock_lib:
+    with (
+        patch("app.graph.workflow.Librarian") as mock_lib,
+        patch("app.graph.workflow.Critic") as mock_critic,
+        # Scribe must be patched too: Phase 4 wiring lets the graph flow into
+        # drafting after a synthesis approve, and the real Scribe refuses an
+        # empty approved_pool (docs/agents/scribe.md).
+        patch("app.graph.workflow.Scribe") as mock_scribe,
+    ):
         mock_lib.return_value.run = AsyncMock(return_value=librarian_out)
-        with patch("app.graph.workflow.Critic") as mock_critic:
-            mock_critic.return_value.run = AsyncMock(return_value=_critic_output())
+        mock_critic.return_value.run = AsyncMock(return_value=_critic_output())
+        # The Scribe is only invoked because the graph now flows past the
+        # synthesis gate into drafting; returning a minimal section keeps
+        # the focus of this test on the synthesis-override behaviour.
+        from datetime import UTC, datetime
 
-            initial_state = {
-                "project_id": TEST_PROJECT_ID,
-                "workflow_run_id": run_id,
-                "seed_query": "test",
-                "phase": Phase.DISCOVERY,
-                "candidates": [],
-                "approved_pool": [],
-                "awaiting_approval": False,
-                "last_feedback": None,
-                "last_override": None,
-                "expanded_queries": [],
-                "sections_done": [],
-                "sections_remaining": ["abstract"],
-                "drafts": [],
-                "matrix": None,
-                "summary": None,
-                "synthesis_approval": None,
-            }
-            await graph.ainvoke(initial_state, config)
-            # Approve the pool → graph runs synthesize, parks at synthesis gate.
-            await graph.ainvoke(Command(resume="approve"), config)
-            # Override the synthesis: resume="approve" + last_override (how
-            # override_workflow drives it).
-            await graph.ainvoke(
-                Command(resume="approve", update={"last_override": human_summary}),
-                config,
+        from app.agents.scribe import ScribeOutput
+
+        mock_scribe.return_value.run = AsyncMock(
+            return_value=ScribeOutput(
+                section=Artifact(
+                    id=uuid4(),
+                    project_id=TEST_PROJECT_ID,
+                    kind="section",
+                    label="abstract",
+                    content="## Abstract\n\nstub",
+                    mime_type="text/markdown",
+                    produced_by="scribe",
+                    created_at=datetime.now(tz=UTC),
+                ),
+                cited_keys=[],
             )
-            snapshot = await graph.aget_state(config)
+        )
+
+        initial_state = {
+            "project_id": TEST_PROJECT_ID,
+            "workflow_run_id": run_id,
+            "seed_query": "test",
+            "phase": Phase.DISCOVERY,
+            "candidates": [],
+            "approved_pool": [],
+            "awaiting_approval": False,
+            "last_feedback": None,
+            "last_override": None,
+            "expanded_queries": [],
+            "sections_done": [],
+            "sections_remaining": ["abstract"],
+            "drafts": [],
+            "matrix": None,
+            "summary": None,
+            "synthesis_approval": None,
+        }
+        await graph.ainvoke(initial_state, config)
+        # Approve the pool → graph runs synthesize, parks at synthesis gate.
+        await graph.ainvoke(Command(resume="approve"), config)
+        # Override the synthesis: resume="approve" + last_override (how
+        # override_workflow drives it). After Phase 4 wiring this also flows
+        # into node_draft_section and parks at the section gate.
+        await graph.ainvoke(
+            Command(resume="approve", update={"last_override": human_summary}),
+            config,
+        )
+        snapshot = await graph.aget_state(config)
 
     # The summary in state must now be the human-edited artifact, not the Critic's.
     final_summary = snapshot.values.get("summary")

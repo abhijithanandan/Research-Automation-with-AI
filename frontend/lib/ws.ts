@@ -1,7 +1,7 @@
 // WebSocket client. Mirrors SPEC.md §4.
 // Discriminated union of server→client events. Add new event types here AND in SPEC.md.
 
-import type { Phase, WorkflowState } from "./types";
+import type { Phase, SectionName, WorkflowState } from "./types";
 
 export type ServerEvent =
   | { type: "auth.ok"; ts: string }
@@ -10,7 +10,16 @@ export type ServerEvent =
   | { type: "agent.token"; ts: string; agent: string; run_id: string; delta: string }
   | { type: "agent.completed"; ts: string; agent: string; run_id: string; artifact_ids: string[] }
   | { type: "agent.error"; ts: string; agent: string; run_id: string; error: string }
-  | { type: "approval.required"; ts: string; phase: Phase; run_id: string; summary: string }
+  | {
+      type: "approval.required";
+      ts: string;
+      phase: Phase;
+      run_id: string;
+      summary: string;
+      // `section` is present only when phase === "drafting" — identifies
+      // which of the seven canonical sections is up for review (SPEC §4.1).
+      section?: SectionName;
+    }
   | { type: "usage.tick"; ts: string; tokens_in: number; tokens_out: number; cost_usd: number }
   | {
       // Emitted when project spend crosses token_cap_warn_pct of the cap
