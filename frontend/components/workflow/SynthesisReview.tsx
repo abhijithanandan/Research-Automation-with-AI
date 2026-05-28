@@ -255,12 +255,28 @@ export function SynthesisReview({
     });
   }
 
-  // ── Loading ───────────────────────────────────────────────────────────
+  // ── Loading — skeleton, not a spinner ─────────────────────────────────
+  // Mirror the eventual layout (header line, tab row, matrix grid) so the
+  // transition into real content has no jump (ui-ux-polish loading patterns).
   if (loading) {
     return (
-      <div className="flex items-center gap-3 rounded-xl border border-border bg-background px-5 py-4 text-sm text-slate-500">
-        <span className="h-4 w-4 animate-spin rounded-full border-2 border-border border-t-emerald-500" />
-        Loading the literature synthesis…
+      <div className="space-y-5 animate-fade-in">
+        <div className="space-y-2">
+          <div className="skeleton h-5 w-48" />
+          <div className="skeleton h-3 w-72" />
+        </div>
+        <div className="flex gap-3">
+          <div className="skeleton h-7 w-24" />
+          <div className="skeleton h-7 w-36" />
+        </div>
+        <div className="space-y-2.5">
+          {[0, 1, 2, 3, 4].map((i) => (
+            <div key={i} className="skeleton h-10 w-full" />
+          ))}
+        </div>
+        <p className="font-mono text-[11px] uppercase tracking-[0.18em] text-muted-foreground">
+          Critic is synthesizing…
+        </p>
       </div>
     );
   }
@@ -268,28 +284,28 @@ export function SynthesisReview({
   // ── Empty (artifacts not yet available) ───────────────────────────────
   if (!matrix && !summary) {
     return (
-      <div className="flex flex-col items-center gap-2 rounded-xl border border-border bg-background py-10 text-center">
-        <span className="text-2xl">🧪</span>
-        <p className="text-sm text-slate-500">No synthesis artifacts yet.</p>
-        <p className="text-xs text-slate-600">The Critic may still be working.</p>
+      <div className="py-12 text-center">
+        <p className="text-sm text-muted">No synthesis artifacts yet.</p>
+        <p className="mt-1 text-xs text-muted-foreground">The Critic may still be working.</p>
       </div>
     );
   }
 
   return (
-    <div className="space-y-4 animate-fade-in">
-      {/* ── Synthesis card ─────────────────────────────────────────────── */}
-      <div className="overflow-hidden rounded-xl border border-emerald-500/20 bg-background">
+    <div className="space-y-8 animate-fade-in">
+      {/* ── Synthesis section — borderless; whitespace + a tab row carry the
+          structure instead of a card box. ─────────────────────────────── */}
+      <div>
         {/* Header */}
-        <div className="flex items-center justify-between border-b border-border px-5 py-4">
+        <div className="flex items-center justify-between pb-4">
           <div>
-            <h2 className="flex items-center gap-2 text-sm font-semibold text-slate-200">
-              <span className="flex h-5 w-5 items-center justify-center rounded bg-emerald-500/20 text-[10px] text-emerald-300">
+            <h2 className="flex items-center gap-2 font-display text-lg font-bold text-foreground">
+              <span className="flex h-5 w-5 items-center justify-center rounded bg-primary/15 font-mono text-[10px] text-primary">
                 02
               </span>
               Literature synthesis
             </h2>
-            <p className="mt-0.5 text-xs text-slate-500">
+            <p className="mt-1 text-xs text-muted">
               The Critic compared {paperCount} paper{paperCount !== 1 ? "s" : ""} and wrote a narrative review.
             </p>
           </div>
@@ -298,8 +314,8 @@ export function SynthesisReview({
               className={cn(
                 "shrink-0 rounded-full border px-3 py-1 text-xs font-medium",
                 allFailed
-                  ? "border-red-500/30 bg-red-500/10 text-red-400"
-                  : "border-amber-500/20 bg-amber-500/10 text-amber-400",
+                  ? "border-destructive/30 bg-destructive/10 text-destructive"
+                  : "border-warning/20 bg-warning/10 text-warning",
               )}
             >
               {failedCount}/{paperCount} extraction{failedCount !== 1 ? "s" : ""} failed
@@ -309,10 +325,10 @@ export function SynthesisReview({
 
         {/* Failure banner — surfaces the root cause without the JSON wall. */}
         {(allFailed || narrativeFailed) && (
-          <div className="border-b border-red-500/20 bg-red-500/5 px-5 py-3">
+          <div className="border-l-2 border-destructive py-3 pl-4">
             <div className="flex items-start gap-2.5">
               <svg
-                className="mt-0.5 h-4 w-4 shrink-0 text-red-400"
+                className="mt-0.5 h-4 w-4 shrink-0 text-destructive"
                 viewBox="0 0 16 16"
                 fill="none"
               >
@@ -320,14 +336,14 @@ export function SynthesisReview({
                 <circle cx="8" cy="8" r="6" stroke="currentColor" strokeWidth="1.5" />
               </svg>
               <div className="space-y-0.5">
-                <p className="text-xs font-semibold text-red-300">
+                <p className="text-xs font-semibold text-destructive">
                   The Critic could not complete the synthesis
                 </p>
-                <p className="text-xs text-slate-400">
+                <p className="text-xs text-muted">
                   {humanizeError(
                     parsedMatrix?.rows.find((r) => r.extraction_failed)?.error ?? narrative,
                   )}{" "}
-                  Use <span className="text-slate-300">Reject &amp; regenerate</span> once the
+                  Use <span className="text-foreground">Reject &amp; regenerate</span> once the
                   provider quota recovers.
                 </p>
               </div>
@@ -336,7 +352,7 @@ export function SynthesisReview({
         )}
 
         {/* Tabs */}
-        <div className="flex gap-1 border-b border-border px-3 pt-3">
+        <div className="flex gap-1 border-b border-border pt-2">
           <TabButton active={tab === "narrative"} onClick={() => setTab("narrative")}>
             Narrative
           </TabButton>
@@ -346,19 +362,21 @@ export function SynthesisReview({
         </div>
 
         {/* Tab body */}
-        <div className="px-5 py-5">
+        <div className="py-6">
           {tab === "narrative" &&
             (!narrative ? (
-              <p className="text-sm text-slate-500">No narrative was produced.</p>
+              <p className="text-sm text-muted">No narrative was produced.</p>
             ) : narrativeFailed ? (
-              <div className="rounded-lg border border-red-500/20 bg-red-500/5 p-4">
-                <p className="text-sm font-medium text-red-300">Narrative generation failed</p>
-                <p className="mt-1 text-xs leading-relaxed text-slate-400">
+              <div className="rounded-lg border border-destructive/20 bg-destructive/5 p-4">
+                <p className="text-sm font-medium text-destructive">Narrative generation failed</p>
+                <p className="mt-1 text-xs leading-relaxed text-muted">
                   {humanizeError(narrative)}
                 </p>
               </div>
             ) : (
-              <Markdown content={narrative} />
+              <div className="mx-auto max-w-[68ch]">
+                <Markdown content={narrative} variant="prose" />
+              </div>
             ))}
 
           {tab === "matrix" &&
@@ -388,7 +406,7 @@ export function SynthesisReview({
                 <MatrixTable rows={parsedMatrix.rows} paperByKey={paperByKey} />
               </div>
             ) : (
-              <p className="text-sm text-slate-500">
+              <p className="text-sm text-muted">
                 The comparison matrix could not be parsed.
               </p>
             ))}
@@ -405,17 +423,18 @@ export function SynthesisReview({
         onClose={() => setMatrixExpanded(false)}
       />
 
-      {/* ── Approval panel ─────────────────────────────────────────────── */}
-      <div className="glow-emerald overflow-hidden rounded-xl border border-emerald-700/40 bg-emerald-800/10">
-        <div className="flex items-center gap-3 border-b border-emerald-700/40 px-5 py-4">
-          <span className="animate-pulse-dot flex h-2 w-2 rounded-full bg-emerald-400" />
-          <p className="text-sm font-semibold text-emerald-300">Review the synthesis</p>
+      {/* ── Approval panel — borderless review gate: a left emerald rule +
+          soft glow marks the awaiting-review state without a boxed card. ── */}
+      <div className="glow-emerald border-l-2 border-primary-dim pl-5">
+        <div className="flex items-center gap-2.5 pb-4">
+          <span className="animate-pulse-dot flex h-2 w-2 rounded-full bg-primary" />
+          <p className="font-display text-base font-bold text-primary">Review the synthesis</p>
         </div>
 
-        <div className="space-y-4 px-5 py-4">
+        <div className="space-y-4">
           {action === "idle" && (
             <>
-              <p className="text-sm text-slate-400">
+              <p className="text-sm text-muted">
                 Approve to advance to drafting, reject with feedback to regenerate, or
                 edit the narrative directly.
               </p>
@@ -424,11 +443,11 @@ export function SynthesisReview({
                   type="button"
                   onClick={onApprove}
                   disabled={busy}
-                  className="flex items-center gap-2 rounded-lg border border-emerald-500/30 bg-emerald-500/10 px-4 py-2 text-sm font-medium text-emerald-400 transition-all hover:border-emerald-500/50 hover:bg-emerald-500/20 hover:shadow-[0_0_12px_rgba(16,185,129,0.2)] disabled:cursor-not-allowed disabled:opacity-40"
+                  className="flex items-center gap-2 rounded-md bg-primary px-5 py-2.5 text-sm font-semibold text-primary-foreground transition-all duration-200 hover:bg-primary-hover hover:shadow-[0_0_20px_oklch(72%_0.20_155_/_0.35)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/60 active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-40"
                 >
                   {busy ? (
                     <>
-                      <span className="inline-block h-3.5 w-3.5 animate-spin rounded-full border-2 border-emerald-400/30 border-t-emerald-400" />
+                      <span className="inline-block h-3.5 w-3.5 animate-spin rounded-full border-2 border-primary/30 border-t-primary" />
                       Working…
                     </>
                   ) : (
@@ -451,7 +470,7 @@ export function SynthesisReview({
                   type="button"
                   onClick={() => setAction("reject")}
                   disabled={busy}
-                  className="flex items-center gap-2 rounded-lg border border-emerald-700/40 bg-emerald-800/10 px-4 py-2 text-sm font-medium text-emerald-300 transition-all hover:border-emerald-700/60 hover:bg-emerald-800/20 disabled:cursor-not-allowed disabled:opacity-40"
+                  className="flex items-center gap-2 rounded-lg border border-primary-dim/40 bg-primary-dim-bg px-4 py-2 text-sm font-medium text-primary transition-all hover:border-primary-dim/60 hover:bg-primary-dim-bg disabled:cursor-not-allowed disabled:opacity-40"
                 >
                   <svg className="h-3.5 w-3.5" viewBox="0 0 16 16" fill="none">
                     <path
@@ -468,7 +487,7 @@ export function SynthesisReview({
                   type="button"
                   onClick={startEditing}
                   disabled={busy || !summary}
-                  className="flex items-center gap-2 rounded-lg border border-slate-600/50 bg-slate-700/50 px-4 py-2 text-sm font-medium text-slate-300 transition-all hover:border-slate-500 hover:bg-slate-700 disabled:cursor-not-allowed disabled:opacity-40"
+                  className="flex items-center gap-2 rounded-lg border border-border bg-surface-elevated px-4 py-2 text-sm font-medium text-foreground transition-all hover:bg-surface-elevated disabled:cursor-not-allowed disabled:opacity-40"
                 >
                   <svg className="h-3.5 w-3.5" viewBox="0 0 16 16" fill="none">
                     <path
@@ -487,11 +506,11 @@ export function SynthesisReview({
 
           {action === "reject" && (
             <div className="space-y-3 animate-fade-in">
-              <label className="block text-xs font-medium uppercase tracking-wider text-slate-400">
+              <label className="block text-xs font-medium uppercase tracking-wider text-muted">
                 Feedback for the Critic
               </label>
               <textarea
-                className="w-full rounded-lg border border-border bg-slate-900/80 p-3 text-sm text-slate-200 placeholder-slate-600 transition-colors focus:border-emerald-700/60 focus:outline-none focus:ring-1 focus:ring-emerald-700/30"
+                className="w-full rounded-lg border border-border bg-surface-elevated p-3 text-sm text-foreground placeholder-muted-foreground/50 transition-colors focus:border-primary-dim/60 focus:outline-none focus:ring-1 focus:ring-primary-dim/30"
                 rows={3}
                 placeholder="e.g. Group the synthesis by application domain, not by method…"
                 value={feedback}
@@ -503,7 +522,7 @@ export function SynthesisReview({
                   type="button"
                   onClick={handleRejectSubmit}
                   disabled={busy || !feedback.trim()}
-                  className="rounded-lg border border-emerald-700/40 bg-emerald-800/10 px-4 py-2 text-sm font-medium text-emerald-300 transition-all hover:border-emerald-700/60 hover:bg-emerald-800/20 disabled:cursor-not-allowed disabled:opacity-40"
+                  className="rounded-lg border border-primary-dim/40 bg-primary-dim-bg px-4 py-2 text-sm font-medium text-primary transition-all hover:border-primary-dim/60 hover:bg-primary-dim-bg disabled:cursor-not-allowed disabled:opacity-40"
                 >
                   {busy ? "Working…" : "Submit & regenerate"}
                 </button>
@@ -514,7 +533,7 @@ export function SynthesisReview({
                     setFeedback("");
                   }}
                   disabled={busy}
-                  className="rounded-lg border border-border px-4 py-2 text-sm font-medium text-slate-400 transition-all hover:bg-slate-800 disabled:opacity-40"
+                  className="rounded-lg border border-border px-4 py-2 text-sm font-medium text-muted transition-all hover:bg-surface-elevated disabled:opacity-40"
                 >
                   Cancel
                 </button>
@@ -524,9 +543,9 @@ export function SynthesisReview({
 
           {action === "override" && (
             <div className="animate-fade-in space-y-3">
-              <p className="text-xs text-slate-500">
+              <p className="text-xs text-muted">
                 Your edited narrative replaces the Critic&apos;s output and is recorded as{" "}
-                <code className="rounded bg-slate-800 px-1.5 py-0.5 font-mono text-slate-300">
+                <code className="rounded bg-surface-elevated px-1.5 py-0.5 font-mono text-foreground">
                   produced_by: human
                 </code>{" "}
                 in the audit log.
@@ -550,34 +569,34 @@ export function SynthesisReview({
                 </div>
                 {/* Diff stats — visible from any view so the user always knows
                     how much they have changed. */}
-                <div className="flex items-center gap-3 text-[11px] text-slate-500">
-                  <span className="text-emerald-400">+{stats.added}</span>
-                  <span className="text-red-400">−{stats.removed}</span>
+                <div className="flex items-center gap-3 text-[11px] text-muted">
+                  <span className="text-primary">+{stats.added}</span>
+                  <span className="text-destructive">−{stats.removed}</span>
                 </div>
               </div>
 
               {editView === "edit" && (
                 <div className="grid grid-cols-1 gap-3 lg:grid-cols-2">
                   <div className="space-y-1.5">
-                    <label className="block text-xs font-medium uppercase tracking-wider text-slate-400">
+                    <label className="block text-xs font-medium uppercase tracking-wider text-muted">
                       Markdown source
                     </label>
                     <textarea
-                      className="h-72 w-full rounded-lg border border-border bg-slate-900/80 p-3 font-mono text-xs leading-relaxed text-slate-200 placeholder-slate-600 transition-colors focus:border-emerald-500/60 focus:outline-none focus:ring-1 focus:ring-emerald-500/30"
+                      className="h-72 w-full rounded-lg border border-border bg-surface-elevated p-3 font-mono text-xs leading-relaxed text-foreground placeholder-muted-foreground/50 transition-colors focus:border-primary/60 focus:outline-none focus:ring-1 focus:ring-primary/30"
                       value={editContent}
                       onChange={(e) => setEditContent(e.target.value)}
                       autoFocus
                     />
                   </div>
                   <div className="space-y-1.5">
-                    <label className="block text-xs font-medium uppercase tracking-wider text-slate-400">
+                    <label className="block text-xs font-medium uppercase tracking-wider text-muted">
                       Live preview
                     </label>
-                    <div className="h-72 overflow-y-auto rounded-lg border border-border bg-background p-3">
+                    <div className="h-72 overflow-y-auto rounded-lg bg-surface-elevated p-4">
                       {editContent.trim() ? (
                         <Markdown content={editContent} />
                       ) : (
-                        <p className="text-xs text-slate-600">Preview appears here…</p>
+                        <p className="text-xs text-muted-foreground">Preview appears here…</p>
                       )}
                     </div>
                   </div>
@@ -587,11 +606,11 @@ export function SynthesisReview({
               {editView === "diff" && <DiffPane ops={diffOps} />}
 
               {editView === "preview" && (
-                <div className="h-96 overflow-y-auto rounded-lg border border-border bg-background p-4">
+                <div className="h-96 overflow-y-auto rounded-lg bg-surface-elevated p-4">
                   {editContent.trim() ? (
                     <Markdown content={editContent} />
                   ) : (
-                    <p className="text-xs text-slate-600">Nothing to preview yet.</p>
+                    <p className="text-xs text-muted-foreground">Nothing to preview yet.</p>
                   )}
                 </div>
               )}
@@ -601,7 +620,7 @@ export function SynthesisReview({
                   type="button"
                   onClick={handleOverrideSubmit}
                   disabled={busy || !editContent.trim()}
-                  className="rounded-lg border border-emerald-500/40 bg-emerald-500/10 px-4 py-2 text-sm font-medium text-emerald-300 transition-all hover:bg-emerald-500/20 disabled:cursor-not-allowed disabled:opacity-40"
+                  className="rounded-lg border border-primary/40 bg-primary/10 px-4 py-2 text-sm font-medium text-primary transition-all hover:bg-primary/15 disabled:cursor-not-allowed disabled:opacity-40"
                 >
                   {busy ? "Working…" : "Save & approve"}
                 </button>
@@ -612,7 +631,7 @@ export function SynthesisReview({
                     setEditContent("");
                   }}
                   disabled={busy}
-                  className="rounded-lg border border-border px-4 py-2 text-sm font-medium text-slate-400 transition-all hover:bg-slate-800 disabled:opacity-40"
+                  className="rounded-lg border border-border px-4 py-2 text-sm font-medium text-muted transition-all hover:bg-surface-elevated disabled:opacity-40"
                 >
                   Cancel
                 </button>
@@ -643,10 +662,12 @@ function TabButton({
       type="button"
       onClick={onClick}
       className={cn(
-        "rounded-t-lg px-3.5 py-2 text-xs font-medium transition-colors",
+        // Underline-indicator tab (borderless): the active tab is marked by an
+        // emerald rule along its bottom edge, not a filled pill box.
+        "-mb-px border-b-2 px-1 pb-2.5 text-xs font-medium transition-all duration-200",
         active
-          ? "bg-emerald-500/10 text-emerald-300 ring-1 ring-inset ring-emerald-500/20"
-          : "text-slate-500 hover:text-slate-300",
+          ? "border-primary text-primary"
+          : "border-transparent text-muted hover:text-foreground",
       )}
     >
       {children}
@@ -671,8 +692,33 @@ function EditViewButton({
       className={cn(
         "rounded-md px-2.5 py-1 text-[11px] font-medium uppercase tracking-wider transition-colors",
         active
-          ? "bg-emerald-500/15 text-emerald-300 ring-1 ring-inset ring-emerald-500/30"
-          : "text-slate-500 hover:text-slate-300",
+          ? "bg-primary/15 text-primary ring-1 ring-inset ring-primary/30"
+          : "text-muted hover:text-foreground",
+      )}
+    >
+      {children}
+    </button>
+  );
+}
+
+/** Segmented toggle button for the matrix Comfortable/Compact density switch. */
+function DensityButton({
+  active,
+  onClick,
+  children,
+}: {
+  active: boolean;
+  onClick: () => void;
+  children: React.ReactNode;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      aria-pressed={active}
+      className={cn(
+        "rounded px-2.5 py-1 text-[10px] font-medium uppercase tracking-[0.12em] transition-all duration-150 ease-in-out focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/60",
+        active ? "bg-primary text-primary-foreground" : "text-muted hover:text-foreground",
       )}
     >
       {children}
@@ -684,21 +730,21 @@ function EditViewButton({
 function DiffPane({ ops }: { ops: DiffOp[] }) {
   if (ops.length === 0) {
     return (
-      <p className="rounded-lg border border-border bg-background px-4 py-6 text-center text-xs text-slate-500">
+      <p className="py-6 text-center text-xs text-muted">
         Nothing to compare yet.
       </p>
     );
   }
   return (
-    <div className="h-96 overflow-y-auto rounded-lg border border-border bg-background font-mono text-[11px] leading-relaxed">
+    <div className="h-96 overflow-y-auto rounded-lg bg-surface-elevated p-4 font-mono text-[11px] leading-relaxed">
       {ops.map((op, i) => {
         if (op.type === "keep") {
           return (
             <div
               key={i}
-              className="flex gap-3 border-b border-border px-3 py-0.5 text-slate-500"
+              className="flex gap-3 border-b border-border px-3 py-0.5 text-muted"
             >
-              <span className="w-3 shrink-0 text-slate-700"> </span>
+              <span className="w-3 shrink-0 text-muted-foreground"> </span>
               <span className="whitespace-pre-wrap break-words">
                 {op.edited || " "}
               </span>
@@ -709,9 +755,9 @@ function DiffPane({ ops }: { ops: DiffOp[] }) {
           return (
             <div
               key={i}
-              className="flex gap-3 border-b border-border bg-emerald-500/10 px-3 py-0.5 text-emerald-300"
+              className="flex gap-3 border-b border-border bg-primary/10 px-3 py-0.5 text-primary"
             >
-              <span className="w-3 shrink-0 select-none text-emerald-500">+</span>
+              <span className="w-3 shrink-0 select-none text-primary">+</span>
               <span className="whitespace-pre-wrap break-words">
                 {op.edited || " "}
               </span>
@@ -721,10 +767,10 @@ function DiffPane({ ops }: { ops: DiffOp[] }) {
         return (
           <div
             key={i}
-            className="flex gap-3 border-b border-border bg-red-500/10 px-3 py-0.5 text-red-300/90"
+            className="flex gap-3 border-b border-border bg-destructive/10 px-3 py-0.5 text-destructive/90"
           >
-            <span className="w-3 shrink-0 select-none text-red-500">−</span>
-            <span className="whitespace-pre-wrap break-words line-through decoration-red-500/40">
+            <span className="w-3 shrink-0 select-none text-destructive">−</span>
+            <span className="whitespace-pre-wrap break-words line-through decoration-destructive/40">
               {op.original || " "}
             </span>
           </div>
@@ -752,21 +798,23 @@ function PaperIdentity({
           paper?.year ? ` · ${paper.year}` : ""
         }`
       : null;
-  const keyClass = accent === "violet" ? "text-emerald-300" : "text-amber-300";
+  const keyClass = accent === "violet" ? "text-primary" : "text-warning";
 
   return (
     <div className="space-y-1">
       {/* Title is the primary identifier — never just the citation key. */}
-      <p className="font-medium leading-snug text-slate-200">
+      <p className="font-medium leading-snug text-foreground">
         {title || citationKey || "Untitled paper"}
       </p>
-      {authorLine && <p className="text-[11px] leading-tight text-slate-500">{authorLine}</p>}
+      {authorLine && <p className="text-[11px] leading-tight text-muted">{authorLine}</p>}
       {citationKey && (
         <code className={cn("font-mono text-[10px]", keyClass)}>{citationKey}</code>
       )}
     </div>
   );
 }
+
+type Density = "comfortable" | "compact";
 
 export function MatrixTable({
   rows,
@@ -777,62 +825,110 @@ export function MatrixTable({
 }) {
   const okRows = rows.filter((r) => !r.extraction_failed);
   const failedRows = rows.filter((r) => r.extraction_failed);
+  const [density, setDensity] = useState<Density>("comfortable");
+
+  // Density drives only padding + line-height — never row *height* via fixed
+  // values, so toggling can't cause a layout-shift jolt outside the table.
+  const cellPad = density === "compact" ? "px-2.5 py-2" : "px-3 py-3.5";
+  const headPad = density === "compact" ? "px-2.5 py-2" : "px-3 py-2.5";
+  const cellLeading = density === "compact" ? "leading-snug" : "leading-relaxed";
 
   return (
     <div className="space-y-3">
-      {/* Comparison grid — only the papers that extracted cleanly. */}
+      {/* Comparison grid — only the papers that extracted cleanly. Borderless:
+          no box around the table. The header is sticky to the top and the
+          first column is sticky to the left, so during scroll the user never
+          loses which paper/attribute they're reading. */}
       {okRows.length > 0 ? (
-        <div className="overflow-x-auto rounded-lg border border-border">
-          <table className="w-full table-fixed border-collapse text-xs">
-            <colgroup>
-              <col className="w-56" />
-              {MATRIX_COLUMNS.map((c) => (
-                <col key={c.key} className="w-48" />
-              ))}
-            </colgroup>
-            <thead>
-              <tr className="bg-background">
-                <th className="sticky left-0 z-10 border-b border-r border-border bg-background px-3 py-2.5 text-left font-semibold uppercase tracking-wider text-slate-400">
-                  Paper
-                </th>
-                {MATRIX_COLUMNS.map((col) => (
-                  <th
-                    key={col.key}
-                    className="border-b border-border px-3 py-2.5 text-left font-semibold uppercase tracking-wider text-slate-400"
-                  >
-                    {col.label}
-                  </th>
+        <>
+          {/* Density toggle — sits above the grid, right-aligned, subtle. */}
+          <div className="flex items-center justify-end gap-2">
+            <span className="font-mono text-[10px] uppercase tracking-[0.18em] text-muted-foreground">
+              Density
+            </span>
+            <div className="inline-flex rounded-md bg-surface-elevated p-0.5">
+              <DensityButton
+                active={density === "comfortable"}
+                onClick={() => setDensity("comfortable")}
+              >
+                Comfortable
+              </DensityButton>
+              <DensityButton
+                active={density === "compact"}
+                onClick={() => setDensity("compact")}
+              >
+                Compact
+              </DensityButton>
+            </div>
+          </div>
+
+          <div className="overflow-auto">
+            <table className="w-full table-fixed border-collapse text-xs">
+              <colgroup>
+                <col className="w-56" />
+                {MATRIX_COLUMNS.map((c) => (
+                  <col key={c.key} className="w-48" />
                 ))}
-              </tr>
-            </thead>
-            <tbody>
-              {okRows.map((row, i) => (
-                <tr
-                  key={row.citation_key || i}
-                  className="align-top transition-colors hover:bg-surface-elevated"
-                >
-                  <td className="sticky left-0 z-10 border-b border-r border-border bg-background px-3 py-3">
-                    <PaperIdentity
-                      citationKey={row.citation_key}
-                      paper={paperByKey.get(row.citation_key)}
-                      accent="violet"
-                    />
-                  </td>
+              </colgroup>
+              <thead>
+                <tr>
+                  {/* Corner cell: sticky on BOTH axes (top + left), highest z so
+                      it stays above both the sticky row and the sticky column. */}
+                  <th
+                    className={cn(
+                      "sticky left-0 top-0 z-30 bg-surface-elevated text-left font-mono text-[10px] font-semibold uppercase tracking-[0.15em] text-muted-foreground",
+                      headPad,
+                    )}
+                  >
+                    Paper
+                  </th>
                   {MATRIX_COLUMNS.map((col) => (
-                    <td
+                    <th
                       key={col.key}
-                      className="border-b border-border px-3 py-3 leading-relaxed text-slate-400"
+                      className={cn(
+                        "sticky top-0 z-20 bg-surface-elevated text-left font-mono text-[10px] font-semibold uppercase tracking-[0.15em] text-muted-foreground",
+                        headPad,
+                      )}
                     >
-                      {String(row[col.key] || "—")}
-                    </td>
+                      {col.label}
+                    </th>
                   ))}
                 </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
+              </thead>
+              <tbody className="divide-y divide-border">
+                {okRows.map((row, i) => (
+                  <tr
+                    key={row.citation_key || i}
+                    // Buttery row tracking: a subtle emerald wash follows the
+                    // pointer. group/row lets the sticky first cell adopt the
+                    // same highlight so the row reads as one continuous band.
+                    className="group/row align-top transition-colors duration-150 ease-in-out hover:bg-primary/[0.06]"
+                  >
+                    <td
+                      className={cn(
+                        "sticky left-0 z-10 bg-background transition-colors duration-150 ease-in-out group-hover/row:bg-[oklch(8%_0.01_155)]",
+                        cellPad,
+                      )}
+                    >
+                      <PaperIdentity
+                        citationKey={row.citation_key}
+                        paper={paperByKey.get(row.citation_key)}
+                        accent="violet"
+                      />
+                    </td>
+                    {MATRIX_COLUMNS.map((col) => (
+                      <td key={col.key} className={cn("text-muted", cellPad, cellLeading)}>
+                        {String(row[col.key] || "—")}
+                      </td>
+                    ))}
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </>
       ) : (
-        <p className="rounded-lg border border-border bg-background px-4 py-6 text-center text-sm text-slate-500">
+        <p className="py-6 text-center text-sm text-muted">
           No papers were successfully extracted — the comparison grid is empty.
         </p>
       )}
@@ -841,13 +937,13 @@ export function MatrixTable({
           a plain-English message, and an actionable hint. The previous
           version dumped the raw Gemini JSON which was unreadable. */}
       {failedRows.length > 0 && (
-        <div className="overflow-hidden rounded-lg border border-amber-500/20 bg-amber-500/5">
-          <div className="border-b border-amber-500/15 px-4 py-2.5">
-            <p className="text-xs font-semibold uppercase tracking-wider text-amber-400">
+        <div className="overflow-hidden rounded-lg border border-warning/20 bg-warning/5">
+          <div className="border-b border-warning/15 px-4 py-2.5">
+            <p className="text-xs font-semibold uppercase tracking-wider text-warning">
               {failedRows.length} paper{failedRows.length !== 1 ? "s" : ""} could not be extracted
             </p>
           </div>
-          <ul className="divide-y divide-amber-500/10">
+          <ul className="divide-y divide-warning/10">
             {failedRows.map((row, i) => (
               <FailedPaperCard
                 key={row.citation_key || i}
@@ -872,34 +968,34 @@ const ERROR_KIND_STYLES: Record<
   { tag: string; label: string; dot: string }
 > = {
   quota: {
-    tag: "border-red-500/30 bg-red-500/10 text-red-300",
+    tag: "border-destructive/30 bg-destructive/10 text-destructive",
     label: "Quota exhausted",
-    dot: "bg-red-400",
+    dot: "bg-destructive",
   },
   overload: {
-    tag: "border-amber-500/30 bg-amber-500/10 text-amber-300",
+    tag: "border-warning/30 bg-warning/10 text-warning",
     label: "Model overloaded",
-    dot: "bg-amber-400",
+    dot: "bg-warning",
   },
   auth: {
-    tag: "border-red-500/30 bg-red-500/10 text-red-300",
+    tag: "border-destructive/30 bg-destructive/10 text-destructive",
     label: "Auth failure",
-    dot: "bg-red-400",
+    dot: "bg-destructive",
   },
   schema: {
-    tag: "border-slate-500/30 bg-slate-500/10 text-slate-300",
+    tag: "border-border bg-surface-elevated text-foreground",
     label: "Input rejected",
-    dot: "bg-slate-400",
+    dot: "bg-muted",
   },
   network: {
-    tag: "border-emerald-500/30 bg-emerald-500/10 text-emerald-300",
+    tag: "border-primary/30 bg-primary/10 text-primary",
     label: "Network error",
-    dot: "bg-emerald-400",
+    dot: "bg-primary",
   },
   unknown: {
-    tag: "border-slate-500/30 bg-slate-500/10 text-slate-300",
+    tag: "border-border bg-surface-elevated text-foreground",
     label: "Unknown error",
-    dot: "bg-slate-400",
+    dot: "bg-muted",
   },
 };
 
@@ -929,8 +1025,8 @@ function FailedPaperCard({
         </span>
       </div>
       <div className="mt-2 space-y-1">
-        <p className="text-xs leading-relaxed text-slate-300">{classified.message}</p>
-        <p className="text-[11px] leading-relaxed text-slate-500">{classified.hint}</p>
+        <p className="text-xs leading-relaxed text-foreground">{classified.message}</p>
+        <p className="text-[11px] leading-relaxed text-muted">{classified.hint}</p>
       </div>
     </li>
   );
@@ -987,7 +1083,7 @@ export function SynthesisReadOnly({
 
   if (!matrix && !summary) {
     return (
-      <p className="rounded-lg border border-border bg-background px-4 py-6 text-center text-sm text-slate-500">
+      <p className="py-6 text-center text-sm text-muted">
         No synthesis artifacts to display.
       </p>
     );
@@ -997,10 +1093,10 @@ export function SynthesisReadOnly({
     <div className="space-y-5">
       {matrixHasTable ? (
         <section>
-          <h3 className="mb-2 text-xs font-semibold uppercase tracking-wider text-slate-400">
+          <h3 className="mb-2 text-xs font-semibold uppercase tracking-wider text-muted">
             Comparison matrix
           </h3>
-          <div className="rounded-lg border border-border bg-background px-4 py-4">
+          <div className="rounded-lg bg-surface-elevated px-4 py-4">
             <Markdown content={matrixMarkdown} />
           </div>
         </section>
@@ -1009,7 +1105,7 @@ export function SynthesisReadOnly({
         parsedMatrix.rows.length > 0 && (
           <section>
             <div className="mb-2 flex items-center justify-between">
-              <h3 className="text-xs font-semibold uppercase tracking-wider text-slate-400">
+              <h3 className="text-xs font-semibold uppercase tracking-wider text-muted">
                 Comparison matrix
               </h3>
               <button
@@ -1036,11 +1132,11 @@ export function SynthesisReadOnly({
 
       {narrative.trim() && (
         <section>
-          <h3 className="mb-2 text-xs font-semibold uppercase tracking-wider text-slate-400">
+          <h3 className="mb-3 font-mono text-[10px] uppercase tracking-[0.18em] text-muted-foreground">
             Narrative
           </h3>
-          <div className="rounded-lg border border-border bg-background px-4 py-4">
-            <Markdown content={narrative} />
+          <div className="mx-auto max-w-[68ch]">
+            <Markdown content={narrative} variant="prose" />
           </div>
         </section>
       )}

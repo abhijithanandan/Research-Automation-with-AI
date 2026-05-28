@@ -9,6 +9,8 @@ import type { ReactNode } from "react";
 import ReactMarkdown, { type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
 
+import { cn } from "@/lib/utils";
+
 // react-markdown's Components type loosely-types element overrides — TS
 // `strict: noImplicitAny` won't infer the destructured props. Capture the
 // few props each handler reads in a single named type so each handler stays
@@ -19,107 +21,176 @@ type MdProps = {
   href?: string;
 };
 
-// Component overrides scope styling to the ResearchFlow dark palette
-// (slate-200 body, blue accent) so we don't ship a global prose stylesheet
-// just for one component.
-const COMPONENTS: Components = {
-  h1: ({ children }: MdProps) => (
-    <h1 className="mt-4 mb-2 text-lg font-bold text-slate-100">{children}</h1>
-  ),
-  h2: ({ children }: MdProps) => (
-    <h2 className="mt-4 mb-2 text-base font-semibold text-slate-100">{children}</h2>
-  ),
-  h3: ({ children }: MdProps) => (
-    <h3 className="mt-3 mb-1.5 text-sm font-semibold uppercase tracking-wider text-slate-300">
-      {children}
-    </h3>
-  ),
-  h4: ({ children }: MdProps) => (
-    <h4 className="mt-2 mb-1 text-xs font-semibold uppercase tracking-wider text-slate-400">
-      {children}
-    </h4>
-  ),
-  p: ({ children }: MdProps) => (
-    <p className="mb-3 text-sm leading-relaxed text-slate-400 last:mb-0">{children}</p>
-  ),
-  strong: ({ children }: MdProps) => (
-    <strong className="font-semibold text-slate-100">{children}</strong>
-  ),
-  em: ({ children }: MdProps) => <em className="italic text-slate-300">{children}</em>,
-  code: ({ children, className }: MdProps) => {
-    // Block code: react-markdown emits <pre><code class="language-x">. Inline
-    // code has no className. Style only the inline form here; block code falls
-    // through to the <pre> handler below.
-    if (className) {
-      return <code className={className}>{children}</code>;
-    }
-    return (
-      <code className="rounded bg-slate-800 px-1.5 py-0.5 font-mono text-[0.85em] text-emerald-300">
-        {children}
-      </code>
-    );
-  },
-  pre: ({ children }: MdProps) => (
-    <pre className="mb-3 overflow-x-auto rounded-lg border border-border bg-background p-3 font-mono text-xs leading-relaxed text-slate-300">
-      {children}
-    </pre>
-  ),
-  ul: ({ children }: MdProps) => (
-    <ul className="mb-3 ml-5 list-disc space-y-1 text-sm text-slate-400 marker:text-emerald-500/60">
-      {children}
-    </ul>
-  ),
-  ol: ({ children }: MdProps) => (
-    <ol className="mb-3 ml-5 list-decimal space-y-1 text-sm text-slate-400">{children}</ol>
-  ),
-  li: ({ children }: MdProps) => <li className="leading-relaxed">{children}</li>,
-  a: ({ children, href }: MdProps) => (
-    <a
-      href={href}
-      target="_blank"
-      rel="noopener noreferrer"
-      className="text-emerald-400 underline decoration-emerald-500/40 underline-offset-2 transition-colors hover:text-emerald-300 hover:decoration-emerald-400"
-    >
-      {children}
-    </a>
-  ),
-  blockquote: ({ children }: MdProps) => (
-    <blockquote className="mb-3 border-l-2 border-emerald-500/40 bg-emerald-500/5 py-2 pl-3 text-sm italic text-slate-300">
-      {children}
-    </blockquote>
-  ),
-  hr: () => <hr className="my-4 border-border/60" />,
-  // GitHub-flavored tables — the entire reason this component exists.
-  // Tailwind utility classes give us a scrollable, readable grid that matches
-  // the MatrixTable aesthetic without a global table stylesheet.
-  table: ({ children }: MdProps) => (
-    <div className="mb-3 overflow-x-auto rounded-lg border border-border">
-      <table className="w-full border-collapse text-xs">{children}</table>
-    </div>
-  ),
-  thead: ({ children }: MdProps) => <thead className="bg-background">{children}</thead>,
-  tbody: ({ children }: MdProps) => <tbody>{children}</tbody>,
-  tr: ({ children }: MdProps) => (
-    <tr className="border-b border-border last:border-b-0 hover:bg-surface-elevated">
-      {children}
-    </tr>
-  ),
-  th: ({ children }: MdProps) => (
-    <th className="border-b border-border px-3 py-2.5 text-left font-semibold uppercase tracking-wider text-slate-400">
-      {children}
-    </th>
-  ),
-  td: ({ children }: MdProps) => (
-    <td className="px-3 py-2.5 align-top leading-relaxed text-slate-400">{children}</td>
-  ),
-};
+// Two reading scales:
+//   "compact"  — the in-flow narrative tab; tight, sits inside a review card.
+//   "prose"    — the long-form manuscript reading experience; larger type,
+//                generous line-height, bright tracking-tight headings, muted
+//                off-white body to cut eye strain on long sessions.
+type MdVariant = "compact" | "prose";
 
-export function Markdown({ content }: { content: string }) {
+function buildComponents(variant: MdVariant): Components {
+  const prose = variant === "prose";
+  return {
+    // Headings: stark bright-white, tracking-tight (mandate §3 hierarchy).
+    h1: ({ children }: MdProps) => (
+      <h1
+        className={cn(
+          "font-display font-extrabold tracking-tight text-foreground",
+          prose ? "mt-10 mb-4 text-3xl first:mt-0" : "mt-4 mb-2 text-lg",
+        )}
+      >
+        {children}
+      </h1>
+    ),
+    h2: ({ children }: MdProps) => (
+      <h2
+        className={cn(
+          "font-display font-bold tracking-tight text-foreground",
+          prose ? "mt-9 mb-3 text-2xl" : "mt-4 mb-2 text-base",
+        )}
+      >
+        {children}
+      </h2>
+    ),
+    h3: ({ children }: MdProps) => (
+      <h3
+        className={cn(
+          "font-display font-semibold tracking-tight text-foreground",
+          prose ? "mt-7 mb-2 text-lg" : "mt-3 mb-1.5 text-sm uppercase tracking-wider",
+        )}
+      >
+        {children}
+      </h3>
+    ),
+    h4: ({ children }: MdProps) => (
+      <h4
+        className={cn(
+          "font-semibold uppercase tracking-wider text-muted",
+          prose ? "mt-5 mb-1.5 text-xs" : "mt-2 mb-1 text-xs",
+        )}
+      >
+        {children}
+      </h4>
+    ),
+    // Body: muted off-white, comfortable leading. Prose gets a larger size +
+    // looser leading so long passages read like a paper, not a tooltip.
+    p: ({ children }: MdProps) => (
+      <p
+        className={cn(
+          "text-muted last:mb-0",
+          prose ? "mb-5 text-[15px] leading-[1.75]" : "mb-3 text-sm leading-relaxed",
+        )}
+      >
+        {children}
+      </p>
+    ),
+    strong: ({ children }: MdProps) => (
+      <strong className="font-semibold text-foreground">{children}</strong>
+    ),
+    em: ({ children }: MdProps) => <em className="italic text-foreground">{children}</em>,
+    code: ({ children, className }: MdProps) => {
+      // Block code falls through to <pre>; only style the inline form here.
+      if (className) return <code className={className}>{children}</code>;
+      return (
+        <code className="rounded bg-surface-elevated px-1.5 py-0.5 font-mono text-[0.85em] text-primary">
+          {children}
+        </code>
+      );
+    },
+    pre: ({ children }: MdProps) => (
+      <pre
+        className={cn(
+          "overflow-x-auto rounded-lg bg-surface-elevated p-4 font-mono text-xs leading-relaxed text-foreground",
+          prose ? "mb-5" : "mb-3",
+        )}
+      >
+        {children}
+      </pre>
+    ),
+    ul: ({ children }: MdProps) => (
+      <ul
+        className={cn(
+          "ml-5 list-disc text-muted marker:text-primary/60",
+          prose ? "mb-5 space-y-2 text-[15px] leading-[1.7]" : "mb-3 space-y-1 text-sm",
+        )}
+      >
+        {children}
+      </ul>
+    ),
+    ol: ({ children }: MdProps) => (
+      <ol
+        className={cn(
+          "ml-5 list-decimal text-muted",
+          prose ? "mb-5 space-y-2 text-[15px] leading-[1.7]" : "mb-3 space-y-1 text-sm",
+        )}
+      >
+        {children}
+      </ol>
+    ),
+    li: ({ children }: MdProps) => <li className="leading-relaxed">{children}</li>,
+    a: ({ children, href }: MdProps) => (
+      <a
+        href={href}
+        target="_blank"
+        rel="noopener noreferrer"
+        className="text-primary underline decoration-primary/40 underline-offset-2 transition-colors duration-150 hover:decoration-primary"
+      >
+        {children}
+      </a>
+    ),
+    blockquote: ({ children }: MdProps) => (
+      <blockquote
+        className={cn(
+          "border-l-2 border-primary/40 pl-4 italic text-foreground",
+          prose ? "my-5 text-[15px] leading-[1.7]" : "mb-3 py-2 text-sm",
+        )}
+      >
+        {children}
+      </blockquote>
+    ),
+    hr: () => <hr className={cn("border-border/60", prose ? "my-8" : "my-4")} />,
+    // GitHub-flavored tables — borderless, hairline-divided, matches MatrixTable.
+    table: ({ children }: MdProps) => (
+      <div className={cn("overflow-x-auto", prose ? "mb-5" : "mb-3")}>
+        <table className="w-full border-collapse text-xs">{children}</table>
+      </div>
+    ),
+    thead: ({ children }: MdProps) => <thead className="bg-surface-elevated">{children}</thead>,
+    tbody: ({ children }: MdProps) => (
+      <tbody className="divide-y divide-border">{children}</tbody>
+    ),
+    tr: ({ children }: MdProps) => (
+      <tr className="transition-colors duration-150 ease-in-out hover:bg-primary/[0.04]">
+        {children}
+      </tr>
+    ),
+    th: ({ children }: MdProps) => (
+      <th className="px-3 py-2.5 text-left font-mono text-[10px] font-semibold uppercase tracking-[0.15em] text-muted-foreground">
+        {children}
+      </th>
+    ),
+    td: ({ children }: MdProps) => (
+      <td className="px-3 py-2.5 align-top leading-relaxed text-muted">{children}</td>
+    ),
+  };
+}
+
+const COMPACT_COMPONENTS = buildComponents("compact");
+const PROSE_COMPONENTS = buildComponents("prose");
+
+export function Markdown({
+  content,
+  variant = "compact",
+}: {
+  content: string;
+  variant?: MdVariant;
+}) {
   return (
-    <div className="space-y-1">
-      <ReactMarkdown remarkPlugins={[remarkGfm]} components={COMPONENTS}>
-        {content}
-      </ReactMarkdown>
-    </div>
+    <ReactMarkdown
+      remarkPlugins={[remarkGfm]}
+      components={variant === "prose" ? PROSE_COMPONENTS : COMPACT_COMPONENTS}
+    >
+      {content}
+    </ReactMarkdown>
   );
 }

@@ -41,6 +41,15 @@
   --color-warning: oklch(75% 0.16 80);
   --color-warning-bg: oklch(30% 0.10 80);
 
+  /* --- Typography --------------------------------------------------------- */
+  /* Distinctive, human-engineered stack (NOT Inter). Space Grotesk gives the
+     headings character; IBM Plex Sans is the trustworthy data-legible body;
+     JetBrains Mono carries every number, citation key, and matrix cell so
+     data reads like a terminal. Exposed as font-display/font-sans/font-mono. */
+  --font-display: "Space Grotesk", ui-sans-serif, system-ui, sans-serif;
+  --font-sans: "IBM Plex Sans", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, "SF Mono", monospace;
+
   /* --- Radius ------------------------------------------------------------ */
   --radius-sm: 0.25rem;
   --radius-md: 0.375rem;
@@ -51,6 +60,7 @@
   --animate-fade-in: fade-in 0.3s ease-out forwards;
   --animate-pulse-dot: pulse-dot 1.5s ease-in-out infinite;
   --animate-border-pulse: border-pulse 2s ease-in-out infinite;
+  --animate-shimmer: shimmer 1.4s linear infinite;
 
   @keyframes fade-in {
     from {
@@ -84,6 +94,17 @@
       opacity: 1;
     }
   }
+
+  /* Skeleton shimmer — a soft emerald-tinted sweep across loading placeholders.
+     Replaces generic spinners during manuscript / matrix generation. */
+  @keyframes shimmer {
+    0% {
+      background-position: -150% 0;
+    }
+    100% {
+      background-position: 150% 0;
+    }
+  }
 }
 
 /* Class-based dark variant kept for completeness; we always render dark. */
@@ -92,6 +113,14 @@
 /* --- Base ---------------------------------------------------------------- */
 :root {
   color-scheme: dark;
+  /* Compatibility aliases — some components still read var(--bg)/var(--surface)
+     from the pre-overhaul code. Map them onto the real OKLCH tokens so nothing
+     falls back to an undefined (transparent) value. Remove once every
+     component uses the bg-background / bg-surface utilities directly. */
+  --bg: var(--color-background);
+  --surface: var(--color-surface);
+  --surface-elevated: var(--color-surface-elevated);
+  --border: var(--color-border);
 }
 
 * {
@@ -105,31 +134,69 @@ html {
 body {
   background-color: var(--color-background);
   color: var(--color-foreground);
-  font-family:
-    "Inter",
-    -apple-system,
-    BlinkMacSystemFont,
-    "Segoe UI",
-    sans-serif;
+  font-family: var(--font-sans);
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
   min-height: 100vh;
+  /* Tabular figures so numeric columns (matrix, token counts) align. */
+  font-feature-settings: "tnum" 1, "cv01" 1;
 }
 
-/* --- Custom scrollbar — emerald-tinted, slim --------------------------- */
+/* Headings carry the display face. Components can still opt into font-mono
+   for data, but the default typographic voice is set here. */
+h1,
+h2,
+h3,
+h4 {
+  font-family: var(--font-display);
+  letter-spacing: -0.02em;
+}
+
+/* --- Custom scrollbars — ultra-thin, dark-gray idle → neon-green on hover.
+   The default chrome scrollbar looks clunky on pure black; this makes every
+   scroll surface read as part of the terminal. Track is invisible; the thumb
+   is a hairline that warms to emerald when the pointer is over the scrollable
+   region (group-hover via the container) or directly over the thumb. -------- */
+
+/* Firefox */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--color-border) transparent;
+}
+*:hover {
+  scrollbar-color: var(--color-primary-dim) transparent;
+}
+
+/* WebKit / Blink */
 ::-webkit-scrollbar {
-  width: 6px;
-  height: 6px;
+  width: 8px;
+  height: 8px;
 }
 ::-webkit-scrollbar-track {
   background: transparent;
 }
 ::-webkit-scrollbar-thumb {
-  background: var(--color-border);
-  border-radius: 3px;
+  /* Padding-box trick: the 2px transparent border insets the thumb so it
+     reads as a ~4px hairline with breathing room, not a fat bar. */
+  background-color: var(--color-border);
+  border: 2px solid transparent;
+  background-clip: padding-box;
+  border-radius: 9999px;
+  transition: background-color 0.2s ease-out;
 }
 ::-webkit-scrollbar-thumb:hover {
-  background: var(--color-primary-dim);
+  background-color: var(--color-primary); /* neon emerald on direct hover */
+}
+/* Warm the thumb to a dim emerald whenever the pointer is anywhere over the
+   scroll container — the "subtle neon green on hover" the mandate asks for. */
+*:hover::-webkit-scrollbar-thumb {
+  background-color: var(--color-primary-dim);
+}
+*:hover::-webkit-scrollbar-thumb:hover {
+  background-color: var(--color-primary);
+}
+::-webkit-scrollbar-corner {
+  background: transparent;
 }
 
 /* --- Glow utilities — replaces legacy glow-blue / glow-amber. Emerald
@@ -152,4 +219,46 @@ body {
 }
 .glow-blue {
   box-shadow: 0 0 20px oklch(72% 0.2 155 / 0.18);
+}
+
+/* --- Font utilities (Tailwind v4 picks up --font-* tokens as font-display /
+       font-sans / font-mono, but these explicit classes guarantee availability
+       even where a token isn't auto-mapped). ------------------------------- */
+.font-display {
+  font-family: var(--font-display);
+}
+.font-mono {
+  font-family: var(--font-mono);
+}
+
+/* --- Skeleton loader — emerald-tinted shimmer sweep. Use instead of spinners
+       for manuscript / matrix / section generation (ui-ux-polish loading
+       patterns). Pair with .animate-shimmer-bg for the moving gradient. ---- */
+.skeleton {
+  /* Dark-on-darker sweep: idle tone sits just above pure black; the moving
+     band peaks at a faint emerald-tinted gray so the shimmer is *felt* rather
+     than seen — never bright enough to blind the eye before content loads. */
+  background: linear-gradient(
+    100deg,
+    oklch(10% 0 0) 20%,
+    oklch(17% 0.015 155) 50%,
+    oklch(10% 0 0) 80%
+  );
+  background-size: 220% 100%;
+  animation: var(--animate-shimmer);
+  border-radius: var(--radius-md);
+}
+
+/* --- Reduced motion — respect the OS preference. Functional, not decorative:
+       collapse every animation/transition to near-instant. (WCAG 2.2 +
+       ui-ux-polish accessibility reference.) ------------------------------- */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
 }

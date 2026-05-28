@@ -16,7 +16,7 @@ import {
 } from "@/components/workflow/SynthesisReview";
 import { ApiError, api } from "@/lib/api";
 import type { Artifact, Paper, Phase, SectionName, WorkflowState } from "@/lib/types";
-import { cn } from "@/lib/utils";
+import { cn, focusRing } from "@/lib/utils";
 import { connectProjectEvents, type ManagedSocket, type ServerEvent } from "@/lib/ws";
 
 // ---------------------------------------------------------------------------
@@ -108,12 +108,15 @@ function sourceBadgeClass(source: string) {
   // included blue for semantic_scholar; swapped to cyan-300 on slate (a
   // distinct neutral) so the trading-terminal palette has no pure blues
   // while keeping the four sources visually separable.
-  if (source === "arxiv") return "bg-orange-500/10 text-orange-400 border-orange-500/20";
-  if (source === "semantic_scholar")
-    return "bg-slate-700/40 text-cyan-300 border-cyan-500/20";
-  if (source === "core") return "bg-emerald-500/10 text-emerald-400 border-emerald-500/20";
-  if (source === "europe_pmc") return "bg-pink-500/10 text-pink-400 border-pink-500/20";
-  return "bg-slate-700/50 text-slate-400 border-slate-600/50";
+  // Source badges are categorical data encoding (distinguish providers at a
+  // glance), so distinct hues are intentional here — this is the one place the
+  // emerald-monochrome chrome rule yields to legibility. Chips are borderless
+  // tint-only; no boxes. CORE keeps emerald since it is the brand hue.
+  if (source === "arxiv") return "bg-orange-500/10 text-orange-400";
+  if (source === "semantic_scholar") return "bg-cyan-500/10 text-cyan-300";
+  if (source === "core") return "bg-primary/10 text-primary";
+  if (source === "europe_pmc") return "bg-pink-500/10 text-pink-400";
+  return "bg-surface-elevated text-muted";
 }
 
 function latestArtifact(artifacts: Artifact[]): Artifact | null {
@@ -423,104 +426,116 @@ export default function HomePage() {
   const isBusy = view === "busy" || view === "creating";
   const approvedCount = papers.filter((p) => p.approved).length;
 
+  const phaseTitle = ctx ? phaseLabel(ctx.phase) : "Discovery";
+
   return (
-    <div className="min-h-screen flex flex-col" style={{ background: "var(--bg)" }}>
+    // App shell — top-level CSS Grid: fixed left nav rail + full-bleed content
+    // column. No nested sidebar-within-sidebar; no centered max-w cap. The rail
+    // is its own grid track so the main area sprawls across the rest of the
+    // viewport (the matrix + manuscript get real room to breathe).
+    <div className="grid min-h-screen grid-cols-[15rem_1fr] bg-background text-foreground">
 
-      {/* ── Top nav ─────────────────────────────────────────────────────── */}
-      <header className="border-b border-border px-6 py-3 flex items-center justify-between sticky top-0 z-10 backdrop-blur-sm"
-        style={{ background: "rgba(10,15,30,0.85)" }}>
-        <div className="flex items-center gap-3">
-          <div className="flex h-7 w-7 items-center justify-center rounded-lg border border-emerald-500/30 bg-emerald-500/20">
-            <svg className="h-3.5 w-3.5 text-emerald-400" viewBox="0 0 16 16" fill="none">
-              <circle cx="6" cy="6" r="4" stroke="currentColor" strokeWidth="1.5"/>
-              <path d="M9 9l4 4" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"/>
+      {/* ── Left nav rail ───────────────────────────────────────────────── */}
+      <aside className="sticky top-0 flex h-screen flex-col gap-8 px-6 py-7">
+        {/* Brand */}
+        <div className="flex items-center gap-2.5">
+          <span className="flex h-8 w-8 items-center justify-center rounded-md bg-primary/15 text-primary">
+            <svg className="h-4 w-4" viewBox="0 0 16 16" fill="none">
+              <circle cx="6" cy="6" r="4" stroke="currentColor" strokeWidth="1.5" />
+              <path d="M9 9l4 4" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
             </svg>
-          </div>
-          <span className="text-sm font-semibold tracking-tight text-slate-100">ResearchFlow AI</span>
-          <span className="rounded-full border border-emerald-500/20 bg-emerald-500/10 px-2 py-0.5 text-[10px] font-medium uppercase tracking-wider text-emerald-400">
-            {ctx ? phaseLabel(ctx.phase) : "Phase 1 + 2"}
           </span>
+          <span className="font-display text-base font-bold tracking-tight">ResearchFlow</span>
         </div>
-        {ctx && (
-          <div className="hidden sm:flex items-center gap-1.5">
-            <span className="h-1.5 w-1.5 rounded-full bg-emerald-400 animate-pulse-dot" />
-            <span className="text-xs text-slate-500">Session active</span>
+
+        {/* Phase tracker — vertical in the rail */}
+        <nav className="flex-1">
+          <p className="mb-4 font-mono text-[10px] uppercase tracking-[0.2em] text-muted-foreground">
+            Pipeline
+          </p>
+          <PhaseTracker current={ctx?.phase ?? "discovery"} />
+        </nav>
+
+        {/* Session status */}
+        <div className="flex items-center gap-2 font-mono text-[11px] text-muted-foreground">
+          {ctx ? (
+            <>
+              <span className="h-1.5 w-1.5 rounded-full bg-primary animate-pulse-dot" />
+              <span>session active</span>
+            </>
+          ) : (
+            <>
+              <span className="h-1.5 w-1.5 rounded-full bg-muted-foreground/40" />
+              <span>idle</span>
+            </>
+          )}
+        </div>
+      </aside>
+
+      {/* ── Content column ──────────────────────────────────────────────── */}
+      <div className="flex min-w-0 flex-col">
+
+        {/* Slim top bar — current phase + live status. No border box; the
+            backdrop blur + faint elevation reads as a bar without a hard line. */}
+        <header className="sticky top-0 z-10 flex items-center justify-between px-10 py-5 backdrop-blur-sm">
+          <div className="flex items-baseline gap-3">
+            <h1 className="font-display text-2xl font-extrabold tracking-tight">{phaseTitle}</h1>
+            <span className="font-mono text-[11px] uppercase tracking-[0.18em] text-primary/70">
+              {ctx ? "human-in-the-loop" : "ready"}
+            </span>
           </div>
-        )}
-      </header>
+        </header>
 
-      {/* ── Main ────────────────────────────────────────────────────────── */}
-      <main className="flex-1 px-4 py-10 sm:px-6">
-        {/* Width unlock: review-heavy views (synthesis matrix, per-section
-            drafting, the assembled-manuscript done screen) need real estate
-            so the comparison table and rendered markdown stop nesting
-            scrollbars inside the legacy max-w-2xl cap. */}
-        <div
-          className={cn(
-            "mx-auto space-y-6",
-            ["synthesis", "drafting", "done"].includes(view)
-              ? "max-w-7xl"
-              : "max-w-2xl",
-          )}
-        >
+        {/* Main — full-bleed, generous padding, no max-w cap. Whitespace and
+            type scale carry the hierarchy; data-heavy views fill the width. */}
+        <main className="min-w-0 flex-1 px-10 pb-16">
 
-          {/* Phase tracker */}
-          {ctx && (
-            <div className="animate-fade-in rounded-xl border border-border bg-background px-5 py-4">
-              <PhaseTracker current={ctx.phase} />
-            </div>
-          )}
-
-          {/* ── IDLE: create form ───────────────────────────────────────── */}
+          {/* ── IDLE: create form ─────────────────────────────────────────── */}
           {view === "idle" && (
-            <div className="animate-fade-in">
-              {/* Hero */}
-              <div className="mb-8 space-y-2">
-                <h1 className="text-3xl font-bold tracking-tight text-slate-100">
-                  Discovery
-                </h1>
-                <p className="text-sm text-slate-500 max-w-md">
-                  Define your research topic. The Librarian agent will fetch and rank candidate papers from Semantic Scholar and arXiv.
-                </p>
-              </div>
+            <div className="max-w-xl animate-fade-in">
+              <p className="mb-10 text-sm leading-relaxed text-muted">
+                Define your research topic. The Librarian agent fetches and ranks candidate
+                papers from Semantic Scholar and arXiv.
+              </p>
 
-              <form onSubmit={handleCreate}
-                className="rounded-xl border border-border bg-background p-6 space-y-5">
-                <div className="space-y-1.5">
-                  <label className="block text-xs font-medium text-slate-400 uppercase tracking-wider" htmlFor="title">
+              <form onSubmit={handleCreate} className="space-y-7">
+                <div className="space-y-2">
+                  <label className="block font-mono text-[10px] uppercase tracking-[0.18em] text-muted-foreground" htmlFor="title">
                     Project title
                   </label>
                   <input
                     id="title"
                     type="text"
                     required
-                    className="w-full rounded-lg border border-border bg-background px-3.5 py-2.5 text-sm text-slate-200 placeholder-slate-600 transition-colors focus:border-emerald-500/60 focus:outline-none focus:ring-1 focus:ring-emerald-500/30"
+                    className="w-full bg-transparent pb-2 text-lg text-foreground placeholder-muted-foreground/50 outline-none transition-all duration-200 [border-bottom:1px_solid_var(--color-border)] focus:[border-bottom-color:var(--color-primary)] focus:[box-shadow:0_1px_0_0_var(--color-primary)]"
                     placeholder="Survey of deep learning in medical imaging"
                     value={title}
                     onChange={(e) => setTitle(e.target.value)}
                   />
                 </div>
-                <div className="space-y-1.5">
-                  <label className="block text-xs font-medium text-slate-400 uppercase tracking-wider" htmlFor="seed">
+                <div className="space-y-2">
+                  <label className="block font-mono text-[10px] uppercase tracking-[0.18em] text-muted-foreground" htmlFor="seed">
                     Seed query
                   </label>
                   <input
                     id="seed"
                     type="text"
                     required
-                    className="w-full rounded-lg border border-border bg-background px-3.5 py-2.5 text-sm text-slate-200 placeholder-slate-600 transition-colors focus:border-emerald-500/60 focus:outline-none focus:ring-1 focus:ring-emerald-500/30"
+                    className="w-full bg-transparent pb-2 text-lg text-foreground placeholder-muted-foreground/50 outline-none transition-all duration-200 [border-bottom:1px_solid_var(--color-border)] focus:[border-bottom-color:var(--color-primary)] focus:[box-shadow:0_1px_0_0_var(--color-primary)]"
                     placeholder="convolutional neural networks histopathology classification"
                     value={seedQuery}
                     onChange={(e) => setSeedQuery(e.target.value)}
                   />
-                  <p className="text-xs text-slate-600">The agent will expand this into multiple search queries automatically.</p>
+                  <p className="text-xs text-muted-foreground">
+                    The agent expands this into multiple search queries automatically.
+                  </p>
                 </div>
                 <button
                   type="submit"
-                  className="flex items-center gap-2 rounded-lg bg-emerald-500 px-5 py-2.5 text-sm font-medium text-black transition-all hover:bg-emerald-400 hover:shadow-[0_0_16px_oklch(72%_0.20_155_/_0.35)] focus:outline-none focus:ring-2 focus:ring-emerald-500/50"
+                  className="inline-flex items-center gap-2 rounded-md bg-primary px-6 py-3 text-sm font-semibold text-primary-foreground transition-all duration-200 hover:bg-primary-hover hover:shadow-[0_0_20px_oklch(72%_0.20_155_/_0.35)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/60 active:scale-[0.98]"
                 >
                   <svg className="h-3.5 w-3.5" viewBox="0 0 16 16" fill="none">
-                    <path d="M8 3v10M3 8h10" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"/>
+                    <path d="M8 3v10M3 8h10" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
                   </svg>
                   Start Librarian
                 </button>
@@ -528,28 +543,28 @@ export default function HomePage() {
             </div>
           )}
 
-          {/* ── CREATING ────────────────────────────────────────────────── */}
+          {/* ── CREATING ──────────────────────────────────────────────────── */}
           {view === "creating" && (
-            <div className="flex items-center gap-3 rounded-xl border border-border bg-background px-5 py-4 text-sm text-slate-400">
-              <span className="h-4 w-4 animate-spin rounded-full border-2 border-border border-t-emerald-500" />
+            <div className="flex items-center gap-3 text-sm text-muted animate-fade-in">
+              <span className="h-4 w-4 animate-spin rounded-full border-2 border-border border-t-primary" />
               Creating project and connecting…
             </div>
           )}
 
-          {/* ── RUNNING / BUSY ──────────────────────────────────────────── */}
+          {/* ── RUNNING / BUSY ────────────────────────────────────────────── */}
           {(view === "running" || view === "busy") && (
-            <div className="space-y-3 animate-fade-in">
-              <div className="flex items-center gap-3 rounded-xl border border-border bg-background px-5 py-3 text-sm text-slate-400">
-                <span className="h-3.5 w-3.5 animate-spin rounded-full border-2 border-border border-t-emerald-500" />
-                {view === "busy" ? "Waiting for workflow to advance…" : "Librarian is fetching papers…"}
+            <div className="max-w-3xl space-y-6 animate-fade-in">
+              <div className="flex items-center gap-3 text-sm text-muted">
+                <span className="h-3.5 w-3.5 animate-spin rounded-full border-2 border-border border-t-primary" />
+                {view === "busy" ? "Waiting for the workflow to advance…" : "Librarian is fetching papers…"}
               </div>
               <AgentLog lines={logLines} endRef={logEndRef} />
             </div>
           )}
 
-          {/* ── SYNTHESIS (Phase 2) ─────────────────────────────────────── */}
+          {/* ── SYNTHESIS (Phase 2) — full-bleed for the matrix ───────────── */}
           {view === "synthesis" && (
-            <div className="space-y-4 animate-fade-in">
+            <div className="space-y-6 animate-fade-in">
               <AgentLog lines={logLines} endRef={logEndRef} />
               <SynthesisReview
                 matrix={matrix}
@@ -564,9 +579,9 @@ export default function HomePage() {
             </div>
           )}
 
-          {/* ── DRAFTING (Phase 4) ─────────────────────────────────────── */}
+          {/* ── DRAFTING (Phase 4) — full-bleed for the manuscript ────────── */}
           {view === "drafting" && (
-            <div className="space-y-4 animate-fade-in">
+            <div className="space-y-6 animate-fade-in">
               <AgentLog lines={logLines} endRef={logEndRef} />
               <SectionReview
                 section={sectionArtifact}
@@ -580,107 +595,113 @@ export default function HomePage() {
             </div>
           )}
 
-          {/* ── AWAITING (Phase 1) ──────────────────────────────────────── */}
+          {/* ── AWAITING (Phase 1) — borderless paper list ────────────────── */}
           {view === "awaiting" && (
-            <div className="space-y-4 animate-fade-in">
+            <div className="max-w-4xl space-y-8 animate-fade-in">
               <AgentLog lines={logLines} endRef={logEndRef} />
 
-              {/* Paper list */}
-              <div className="rounded-xl border border-border bg-background overflow-hidden">
-                <div className="flex items-center justify-between border-b border-border px-5 py-4">
-                  <div>
-                    <h2 className="text-sm font-semibold text-slate-200">
-                      Candidate papers
-                    </h2>
-                    <p className="mt-0.5 text-xs text-slate-500">
-                      Click a title to open the source. Check papers to include in your approved pool.
-                    </p>
-                  </div>
-                  {papers.length > 0 && (
-                    <div className="shrink-0 rounded-full border border-emerald-500/20 bg-emerald-500/10 px-3 py-1 text-xs font-medium text-emerald-400">
-                      {approvedCount} / {papers.length} selected
-                    </div>
-                  )}
+              {/* Section header — whitespace + type, no box */}
+              <div className="flex items-end justify-between">
+                <div className="space-y-1">
+                  <h2 className="font-display text-lg font-bold">Candidate papers</h2>
+                  <p className="text-xs text-muted-foreground">
+                    Open a title to view the source. Select papers for your approved pool.
+                  </p>
                 </div>
-
-                {papersLoading && (
-                  <div className="flex items-center gap-3 p-5 text-sm text-slate-500">
-                    <span className="h-4 w-4 animate-spin rounded-full border-2 border-border border-t-emerald-500" />
-                    Loading candidates…
-                  </div>
-                )}
-
-                {!papersLoading && papers.length === 0 && (
-                  <div className="flex flex-col items-center gap-2 py-10 text-center">
-                    <span className="text-2xl">📭</span>
-                    <p className="text-sm text-slate-500">No candidates found.</p>
-                    <p className="text-xs text-slate-600">Try rejecting and regenerating with a broader query.</p>
-                  </div>
-                )}
-
-                {!papersLoading && papers.length > 0 && (
-                  <ul className="divide-y divide-[#1a2236]">
-                    {papers.map((paper) => (
-                      <li
-                        key={paper.id}
-                        className={`flex gap-4 px-5 py-4 transition-colors ${
-                          paper.approved ? "bg-emerald-500/5" : "hover:bg-surface-elevated"
-                        }`}
-                      >
-                        <div className="pt-0.5">
-                          <input
-                            type="checkbox"
-                            id={`p-${paper.id}`}
-                            checked={paper.approved}
-                            disabled={isBusy}
-                            onChange={() => handleTogglePaper(paper)}
-                            className="h-4 w-4 cursor-pointer rounded accent-emerald-500 disabled:cursor-not-allowed"
-                          />
-                        </div>
-                        <label htmlFor={`p-${paper.id}`} className="flex-1 cursor-pointer space-y-1.5 min-w-0">
-                          {/* Title */}
-                          <p className="text-sm font-medium leading-snug text-slate-200">
-                            <a
-                              href={paperSourceUrl(paper)}
-                              target="_blank"
-                              rel="noopener noreferrer"
-                              onClick={(e) => e.stopPropagation()}
-                              className="hover:text-emerald-400 hover:underline underline-offset-2 transition-colors"
-                            >
-                              {paper.title}
-                              <svg className="ml-1 inline h-3 w-3 text-slate-600" viewBox="0 0 12 12" fill="none">
-                                <path d="M3.5 2H2a1 1 0 00-1 1v7a1 1 0 001 1h7a1 1 0 001-1V8.5M7 1h4m0 0v4m0-4L5 7" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round"/>
-                              </svg>
-                            </a>
-                          </p>
-
-                          {/* Meta row */}
-                          <div className="flex flex-wrap items-center gap-2">
-                            <span className="text-xs text-slate-500">
-                              {paper.authors.slice(0, 3).join(", ")}
-                              {paper.authors.length > 3 && " et al."}
-                              {paper.year ? ` · ${paper.year}` : ""}
-                            </span>
-                            <span className={`rounded border px-1.5 py-0.5 text-[10px] font-medium ${sourceBadgeClass(paper.source)}`}>
-                              {sourceLabel(paper.source)}
-                            </span>
-                            <code className="rounded bg-slate-800 px-1.5 py-0.5 font-mono text-[10px] text-slate-500">
-                              {paper.citation_key}
-                            </code>
-                          </div>
-
-                          {/* Abstract */}
-                          {paper.abstract && (
-                            <p className="line-clamp-2 text-xs leading-relaxed text-slate-500">
-                              {paper.abstract}
-                            </p>
-                          )}
-                        </label>
-                      </li>
-                    ))}
-                  </ul>
+                {papers.length > 0 && (
+                  <span className="shrink-0 font-mono text-xs text-primary">
+                    {approvedCount} / {papers.length} selected
+                  </span>
                 )}
               </div>
+
+              {papersLoading && (
+                <div className="space-y-3">
+                  {[0, 1, 2, 3].map((i) => (
+                    <div key={i} className="flex gap-4 py-2">
+                      <div className="skeleton h-4 w-4 shrink-0 rounded" />
+                      <div className="flex-1 space-y-2">
+                        <div className="skeleton h-4 w-3/4" />
+                        <div className="skeleton h-3 w-1/3" />
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              {!papersLoading && papers.length === 0 && (
+                <div className="py-12 text-center">
+                  <p className="text-sm text-muted">No candidates found.</p>
+                  <p className="mt-1 text-xs text-muted-foreground">
+                    Try rejecting and regenerating with a broader query.
+                  </p>
+                </div>
+              )}
+
+              {!papersLoading && papers.length > 0 && (
+                // Rows separated by hairline dividers, not boxed cards.
+                <ul className="divide-y divide-border">
+                  {papers.map((paper) => (
+                    <li
+                      key={paper.id}
+                      className={cn(
+                        "group/paper flex gap-4 rounded-md px-2 py-4 transition-colors duration-150 ease-in-out",
+                        paper.approved ? "bg-primary/[0.05]" : "hover:bg-primary/[0.04]",
+                      )}
+                    >
+                      <div className="pt-0.5">
+                        <input
+                          type="checkbox"
+                          id={`p-${paper.id}`}
+                          checked={paper.approved}
+                          disabled={isBusy}
+                          onChange={() => handleTogglePaper(paper)}
+                          className={cn(
+                            "h-4 w-4 cursor-pointer rounded accent-primary disabled:cursor-not-allowed",
+                            focusRing,
+                          )}
+                        />
+                      </div>
+                      <label htmlFor={`p-${paper.id}`} className="min-w-0 flex-1 cursor-pointer space-y-1.5">
+                        <p className="text-sm font-medium leading-snug text-foreground">
+                          <a
+                            href={paperSourceUrl(paper)}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            onClick={(e) => e.stopPropagation()}
+                            className="underline-offset-2 transition-colors duration-200 hover:text-primary hover:underline"
+                          >
+                            {paper.title}
+                            <svg className="ml-1 inline h-3 w-3 text-muted-foreground" viewBox="0 0 12 12" fill="none">
+                              <path d="M3.5 2H2a1 1 0 00-1 1v7a1 1 0 001 1h7a1 1 0 001-1V8.5M7 1h4m0 0v4m0-4L5 7" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round" />
+                            </svg>
+                          </a>
+                        </p>
+
+                        <div className="flex flex-wrap items-center gap-2">
+                          <span className="text-xs text-muted">
+                            {paper.authors.slice(0, 3).join(", ")}
+                            {paper.authors.length > 3 && " et al."}
+                            {paper.year ? ` · ${paper.year}` : ""}
+                          </span>
+                          <span className={cn("rounded px-1.5 py-0.5 text-[10px] font-medium", sourceBadgeClass(paper.source))}>
+                            {sourceLabel(paper.source)}
+                          </span>
+                          <code className="font-mono text-[10px] text-muted-foreground">
+                            {paper.citation_key}
+                          </code>
+                        </div>
+
+                        {paper.abstract && (
+                          <p className="line-clamp-2 text-xs leading-relaxed text-muted">
+                            {paper.abstract}
+                          </p>
+                        )}
+                      </label>
+                    </li>
+                  ))}
+                </ul>
+              )}
 
               <ApprovalPanel
                 summary={approvalSummary}
@@ -692,215 +713,175 @@ export default function HomePage() {
             </div>
           )}
 
-          {/* ── DONE ────────────────────────────────────────────────────── */}
+          {/* ── DONE ──────────────────────────────────────────────────────── */}
           {view === "done" && (() => {
             const draftingDone = completedPhase === "drafting";
             const synthesisDone = completedPhase === "synthesis";
             const headline = draftingDone
               ? "Manuscript complete — all sections approved"
               : synthesisDone
-                ? "Phase 2 complete — synthesis approved"
-                : "Phase 1 complete";
+                ? "Synthesis approved"
+                : "Pool approved";
             return (
-            <div className="animate-fade-in space-y-4">
-              <div className="rounded-xl border border-emerald-500/20 bg-emerald-500/5 glow-green overflow-hidden">
-                <div className="flex items-center gap-3 border-b border-emerald-500/20 px-5 py-4">
-                  <div className="flex h-7 w-7 items-center justify-center rounded-full bg-emerald-500/20">
-                    <svg className="h-3.5 w-3.5 text-emerald-400" viewBox="0 0 16 16" fill="none">
-                      <path d="M3 8l4 4 6-7" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
+              <div className="space-y-8 animate-fade-in">
+                {/* Completion banner — emerald accent via a left rule + glow,
+                    not a boxed card. */}
+                <div className="flex items-center gap-3 border-l-2 border-primary pl-4">
+                  <span className="flex h-7 w-7 items-center justify-center rounded-full bg-primary/15 text-primary">
+                    <svg className="h-3.5 w-3.5" viewBox="0 0 16 16" fill="none">
+                      <path d="M3 8l4 4 6-7" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
                     </svg>
-                  </div>
-                  <p className="text-sm font-semibold text-emerald-300">
-                    {headline}
-                  </p>
+                  </span>
+                  <h2 className="font-display text-lg font-bold text-foreground">{headline}</h2>
                 </div>
-                <div className="px-5 py-4 space-y-4">
-                  <p className="text-sm text-slate-400">
-                    {draftingDone ? (
-                      <>
-                        Every section has been reviewed and approved. The full manuscript
-                        is rendered below — download it as Markdown.
-                      </>
-                    ) : synthesisDone ? (
-                      <>
-                        The literature synthesis is approved and locked. Phase 4 (Drafting)
-                        will begin when the Scribe agent is enabled.
-                      </>
-                    ) : (
-                      <>
-                        <span className="font-semibold text-emerald-400">{approvedCount} paper{approvedCount !== 1 ? "s" : ""}</span>{" "}
-                        approved and locked into your working pool. Phase 2 (Synthesis) will begin when ready.
-                      </>
-                    )}
-                  </p>
 
-                  {/* Phase 1: approved papers summary */}
-                  {!synthesisDone && !draftingDone && papers.filter((p) => p.approved).length > 0 && (
-                    <ul className="space-y-1.5">
-                      {papers.filter((p) => p.approved).map((p) => (
-                        <li key={p.id} className="flex items-start gap-2 text-xs text-slate-400">
-                          <span className="mt-0.5 text-emerald-500">✓</span>
-                          <a
-                            href={paperSourceUrl(p)}
-                            target="_blank"
-                            rel="noopener noreferrer"
-                            className="hover:text-emerald-400 hover:underline underline-offset-2 transition-colors line-clamp-1"
-                          >
-                            {p.title}
-                          </a>
-                        </li>
-                      ))}
-                    </ul>
+                <p className="max-w-2xl text-sm leading-relaxed text-muted">
+                  {draftingDone ? (
+                    "Every section has been reviewed and approved. The full manuscript is rendered below — download it as Markdown."
+                  ) : synthesisDone ? (
+                    "The literature synthesis is approved and locked. Phase 4 (Drafting) begins when the Scribe agent is enabled."
+                  ) : (
+                    <>
+                      <span className="font-semibold text-primary">{approvedCount} paper{approvedCount !== 1 ? "s" : ""}</span>{" "}
+                      approved and locked into your working pool. Phase 2 (Synthesis) begins when ready.
+                    </>
                   )}
+                </p>
 
-                  {/* Phase 2: final synthesis read-only view — reuses the
-                      MatrixTable + narrative split from the HITL review so
-                      tables stay as real <table>s instead of being mushed
-                      into a single paragraph by raw-Markdown rendering.
-                      Show when *either* artifact is present so a matrix-only
-                      result is still visible if the narrative LLM call failed. */}
-                  {synthesisDone && (summary || matrix) && (
-                    <SynthesisReadOnly matrix={matrix} summary={summary} papers={papers} />
-                  )}
-
-                  {/* Phase 4: assembled manuscript + download. */}
-                  {draftingDone && manuscript && (
-                    <div className="space-y-3">
-                      <div className="flex items-center justify-between">
-                        <p className="text-xs font-semibold uppercase tracking-wider text-slate-400">
-                          Final manuscript
-                        </p>
-                        <button
-                          type="button"
-                          onClick={() => {
-                            const blob = new Blob([manuscript.content], { type: "text/markdown" });
-                            const url = URL.createObjectURL(blob);
-                            const a = document.createElement("a");
-                            a.href = url;
-                            a.download = `${(title || "manuscript").replace(/[^\w.-]+/g, "_")}.md`;
-                            document.body.appendChild(a);
-                            a.click();
-                            a.remove();
-                            URL.revokeObjectURL(url);
-                          }}
-                          className="flex items-center gap-1.5 rounded-lg border border-emerald-500/30 bg-emerald-500/10 px-3 py-1.5 text-xs font-medium text-emerald-300 transition-all hover:bg-emerald-500/20"
+                {/* Phase 1: approved papers summary */}
+                {!synthesisDone && !draftingDone && papers.filter((p) => p.approved).length > 0 && (
+                  <ul className="max-w-2xl space-y-2">
+                    {papers.filter((p) => p.approved).map((p) => (
+                      <li key={p.id} className="flex items-start gap-2 text-xs text-muted">
+                        <span className="mt-0.5 text-primary">✓</span>
+                        <a
+                          href={paperSourceUrl(p)}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="line-clamp-1 underline-offset-2 transition-colors duration-200 hover:text-primary hover:underline"
                         >
-                          <svg className="h-3 w-3" viewBox="0 0 16 16" fill="none">
-                            <path d="M8 2v9m0 0l-3-3m3 3l3-3M3 13h10" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
-                          </svg>
-                          Download .md
-                        </button>
-                      </div>
-                      <div className="max-h-[60vh] overflow-y-auto rounded-lg border border-border bg-background p-4">
-                        <Markdown content={manuscript.content} />
-                      </div>
+                          {p.title}
+                        </a>
+                      </li>
+                    ))}
+                  </ul>
+                )}
+
+                {/* Phase 2: final synthesis read-only — full-bleed. */}
+                {synthesisDone && (summary || matrix) && (
+                  <SynthesisReadOnly matrix={matrix} summary={summary} papers={papers} />
+                )}
+
+                {/* Phase 4: assembled manuscript + download — full-bleed. */}
+                {draftingDone && manuscript && (
+                  <div className="space-y-4">
+                    <div className="flex items-center justify-between">
+                      <p className="font-mono text-[10px] uppercase tracking-[0.18em] text-muted-foreground">
+                        Final manuscript
+                      </p>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          const blob = new Blob([manuscript.content], { type: "text/markdown" });
+                          const url = URL.createObjectURL(blob);
+                          const a = document.createElement("a");
+                          a.href = url;
+                          a.download = `${(title || "manuscript").replace(/[^\w.-]+/g, "_")}.md`;
+                          document.body.appendChild(a);
+                          a.click();
+                          a.remove();
+                          URL.revokeObjectURL(url);
+                        }}
+                        className="inline-flex items-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-semibold text-primary transition-all duration-200 hover:bg-primary/10"
+                      >
+                        <svg className="h-3 w-3" viewBox="0 0 16 16" fill="none">
+                          <path d="M8 2v9m0 0l-3-3m3 3l3-3M3 13h10" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+                        </svg>
+                        Download .md
+                      </button>
                     </div>
-                  )}
+                    {/* max-w-[68ch] caps line length at the optimal reading
+                        measure so prose never stretches across an ultrawide
+                        monitor. Centered, generous vertical scroll region. */}
+                    <div className="mx-auto max-h-[72vh] max-w-[68ch] overflow-y-auto pr-2">
+                      <Markdown content={manuscript.content} variant="prose" />
+                    </div>
+                  </div>
+                )}
 
-                  <AgentLog lines={logLines} endRef={logEndRef} />
+                <AgentLog lines={logLines} endRef={logEndRef} />
 
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setView("idle"); setCtx(null); setLogLines([]);
-                      setPapers([]); setTitle(""); setSeedQuery("");
-                      setMatrix(null); setSummary(null); setCompletedPhase(null);
-                      setSectionArtifact(null); setCurrentSection(null); setManuscript(null);
-                      wsRef.current?.close();
-                    }}
-                    className="rounded-lg border border-emerald-500/30 bg-emerald-500/10 px-4 py-2 text-sm font-medium text-emerald-400 transition-all hover:bg-emerald-500/20"
-                  >
-                    Start new project
-                  </button>
-                </div>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setView("idle"); setCtx(null); setLogLines([]);
+                    setPapers([]); setTitle(""); setSeedQuery("");
+                    setMatrix(null); setSummary(null); setCompletedPhase(null);
+                    setSectionArtifact(null); setCurrentSection(null); setManuscript(null);
+                    wsRef.current?.close();
+                  }}
+                  className="inline-flex items-center rounded-md px-4 py-2 text-sm font-semibold text-primary transition-all duration-200 hover:bg-primary/10"
+                >
+                  Start new project
+                </button>
               </div>
-            </div>
             );
           })()}
 
-          {/* ── ERROR ───────────────────────────────────────────────────── */}
+          {/* ── ERROR (phase conflict) ────────────────────────────────────── */}
           {view === "error" && error?.kind === "conflict" && (
-            // M3-C: phase-conflict banner. Distinct from the generic red
-            // error: amber border + explicit "the workflow advanced —
-            // refresh to continue" copy. Non-dismissable (no Try again
-            // button) because retrying the same action would just hit
-            // the same 409 — the user must reload the project state.
-            <div className="animate-fade-in glow-amber overflow-hidden rounded-xl border border-amber-500/30 bg-amber-500/5">
-              <div className="flex items-center gap-3 border-b border-amber-500/30 px-5 py-4">
-                <div className="flex h-7 w-7 items-center justify-center rounded-full bg-amber-500/20">
-                  <svg
-                    className="h-3.5 w-3.5 text-amber-400"
-                    viewBox="0 0 16 16"
-                    fill="none"
-                  >
-                    <path
-                      d="M8 3v6M8 12v.5"
-                      stroke="currentColor"
-                      strokeWidth="1.5"
-                      strokeLinecap="round"
-                    />
-                    <circle cx="8" cy="8" r="6" stroke="currentColor" strokeWidth="1.5" />
-                  </svg>
-                </div>
-                <p className="text-sm font-semibold text-amber-300">
+            <div className="max-w-2xl space-y-4 border-l-2 border-warning pl-5 animate-fade-in">
+              <div className="flex items-center gap-2.5">
+                <svg className="h-4 w-4 text-warning" viewBox="0 0 16 16" fill="none">
+                  <path d="M8 3v6M8 12v.5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+                  <circle cx="8" cy="8" r="6" stroke="currentColor" strokeWidth="1.5" />
+                </svg>
+                <h2 className="font-display text-base font-bold text-warning">
                   Workflow phase already advanced
-                </p>
+                </h2>
               </div>
-              <div className="space-y-3 px-5 py-4">
-                <p className="text-sm text-slate-300">
-                  {error.message}
-                </p>
-                <p className="text-xs text-slate-500">
-                  The workflow moved past this gate while your tab was open. Reload the
-                  page to fetch the latest project state.
-                </p>
-                <button
-                  type="button"
-                  onClick={() => {
-                    if (typeof window !== "undefined") window.location.reload();
-                  }}
-                  className="rounded-lg border border-amber-500/30 bg-amber-500/10 px-4 py-2 text-sm font-medium text-amber-300 transition-all hover:bg-amber-500/20"
-                >
-                  Reload
-                </button>
-              </div>
+              <p className="text-sm text-foreground">{error.message}</p>
+              <p className="text-xs text-muted-foreground">
+                The workflow moved past this gate while your tab was open. Reload to fetch
+                the latest project state.
+              </p>
+              <button
+                type="button"
+                onClick={() => {
+                  if (typeof window !== "undefined") window.location.reload();
+                }}
+                className="inline-flex items-center rounded-md px-4 py-2 text-sm font-semibold text-warning transition-all duration-200 hover:bg-warning/10"
+              >
+                Reload
+              </button>
             </div>
           )}
           {view === "error" && error?.kind !== "conflict" && (
-            <div className="animate-fade-in overflow-hidden rounded-xl border border-red-500/20 bg-red-500/5">
-              <div className="flex items-center gap-3 border-b border-red-500/20 px-5 py-4">
-                <div className="flex h-7 w-7 items-center justify-center rounded-full bg-red-500/20">
-                  <svg className="h-3.5 w-3.5 text-red-400" viewBox="0 0 16 16" fill="none">
-                    <path d="M8 5v4M8 11v.5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"/>
-                    <circle cx="8" cy="8" r="6" stroke="currentColor" strokeWidth="1.5"/>
-                  </svg>
-                </div>
-                <p className="text-sm font-semibold text-red-300">Something went wrong</p>
+            <div className="max-w-2xl space-y-4 border-l-2 border-destructive pl-5 animate-fade-in">
+              <div className="flex items-center gap-2.5">
+                <svg className="h-4 w-4 text-destructive" viewBox="0 0 16 16" fill="none">
+                  <path d="M8 5v4M8 11v.5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+                  <circle cx="8" cy="8" r="6" stroke="currentColor" strokeWidth="1.5" />
+                </svg>
+                <h2 className="font-display text-base font-bold text-destructive">Something went wrong</h2>
               </div>
-              <div className="px-5 py-4 space-y-4">
-                {error && <p className="text-sm text-slate-400">{error.message}</p>}
-                <button
-                  type="button"
-                  onClick={() => {
-                    setView("idle"); setError(null); setCtx(null);
-                    setLogLines([]); setPapers([]);
-                    setMatrix(null); setSummary(null); setCompletedPhase(null);
-                    wsRef.current?.close();
-                  }}
-                  className="rounded-lg border border-red-500/30 bg-red-500/10 px-4 py-2 text-sm font-medium text-red-400 transition-all hover:bg-red-500/20"
-                >
-                  Try again
-                </button>
-              </div>
+              {error && <p className="text-sm text-muted">{error.message}</p>}
+              <button
+                type="button"
+                onClick={() => {
+                  setView("idle"); setError(null); setCtx(null);
+                  setLogLines([]); setPapers([]);
+                  setMatrix(null); setSummary(null); setCompletedPhase(null);
+                  wsRef.current?.close();
+                }}
+                className="inline-flex items-center rounded-md px-4 py-2 text-sm font-semibold text-destructive transition-all duration-200 hover:bg-destructive/10"
+              >
+                Try again
+              </button>
             </div>
           )}
-        </div>
-      </main>
-
-      {/* ── Footer ──────────────────────────────────────────────────────── */}
-      <footer className="border-t border-border px-6 py-3 text-center text-xs text-slate-700">
-        ResearchFlow AI · Discovery + Synthesis · Human-in-the-loop research automation
-      </footer>
+        </main>
+      </div>
     </div>
   );
 }
@@ -911,15 +892,19 @@ export default function HomePage() {
 
 function AgentLog({ lines, endRef }: { lines: string[]; endRef: React.RefObject<HTMLDivElement> }) {
   if (lines.length === 0) return null;
+  // Borderless terminal: a faint elevated surface + mono type reads as a
+  // console without drawing a hard box around it.
   return (
-    <div className="rounded-xl border border-border bg-background overflow-hidden">
-      <div className="flex items-center gap-2 border-b border-border px-4 py-2">
-        <span className="h-2 w-2 rounded-full bg-red-500/60" />
-        <span className="h-2 w-2 rounded-full bg-amber-500/60" />
-        <span className="h-2 w-2 rounded-full bg-emerald-500/60" />
-        <span className="ml-2 text-[10px] text-slate-600 font-mono uppercase tracking-wider">agent log</span>
+    <div className="overflow-hidden rounded-lg bg-surface-elevated/60">
+      <div className="flex items-center gap-1.5 px-4 py-2.5">
+        <span className="h-2 w-2 rounded-full bg-destructive/50" />
+        <span className="h-2 w-2 rounded-full bg-warning/50" />
+        <span className="h-2 w-2 rounded-full bg-primary/50" />
+        <span className="ml-2 font-mono text-[10px] uppercase tracking-[0.18em] text-muted-foreground">
+          agent log
+        </span>
       </div>
-      <div className="max-h-44 overflow-y-auto p-4">
+      <div className="max-h-44 overflow-y-auto px-4 pb-4">
         {lines.map((line, i) => {
           const isStart = line.startsWith("▶");
           const isDone = line.startsWith("✓");
@@ -927,12 +912,13 @@ function AgentLog({ lines, endRef }: { lines: string[]; endRef: React.RefObject<
           return (
             <div
               key={i}
-              className={`font-mono text-xs leading-relaxed ${
-                isStart ? "text-emerald-300/70"
-                : isDone ? "text-emerald-400"
-                : isError ? "text-red-400"
-                : "text-slate-500"
-              }`}
+              className={cn(
+                "font-mono text-xs leading-relaxed",
+                isStart ? "text-primary/70"
+                  : isDone ? "text-primary"
+                    : isError ? "text-destructive"
+                      : "text-muted",
+              )}
             >
               {line}
             </div>
