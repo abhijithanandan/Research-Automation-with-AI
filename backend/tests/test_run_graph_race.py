@@ -39,17 +39,26 @@ async def test_run_graph_sets_awaiting_approval_on_interrupt() -> None:
             with patch("app.services.workflow._emit", new_callable=AsyncMock):
                 with patch("app.services.workflow._update_run_state", side_effect=capture_state):
                     with patch("app.services.workflow._persist_candidates", new_callable=AsyncMock):
-                        # get_session is a late import — patch at source module.
-                        with patch("app.db.session.get_session") as mock_get_session:
-                            mock_session = AsyncMock()
-                            mock_ctx = MagicMock()
-                            mock_ctx.__aenter__ = AsyncMock(return_value=mock_session)
-                            mock_ctx.__aexit__ = AsyncMock(return_value=False)
-                            mock_get_session.return_value = mock_ctx
+                        # The cost cap (NFR-5) is exercised in test_cost_cap.py;
+                        # the DB session here is fully mocked so the rollup query
+                        # can't run. Stub to False so this test stays focused on
+                        # the interrupt→awaiting_approval path.
+                        with patch(
+                            "app.services.workflow._enforce_cost_cap",
+                            new_callable=AsyncMock,
+                            return_value=False,
+                        ):
+                            # get_session is a late import — patch at source module.
+                            with patch("app.db.session.get_session") as mock_get_session:
+                                mock_session = AsyncMock()
+                                mock_ctx = MagicMock()
+                                mock_ctx.__aenter__ = AsyncMock(return_value=mock_session)
+                                mock_ctx.__aexit__ = AsyncMock(return_value=False)
+                                mock_get_session.return_value = mock_ctx
 
-                            from app.services.workflow import _run_graph
+                                from app.services.workflow import _run_graph
 
-                            await _run_graph(run_id, TEST_PROJECT_ID, "test")
+                                await _run_graph(run_id, TEST_PROJECT_ID, "test")
 
     # Must have been set to awaiting_approval, NOT error.
     assert "awaiting_approval" in update_states
