@@ -502,19 +502,33 @@ async def _run_graph(
         candidates_raw: list[dict[str, Any]] = graph_state.values.get("candidates", [])
         candidate_papers = [Paper(**d) for d in candidates_raw]
 
+        # Token/cost rollup from the Librarian's query-expansion call.
+        usage: dict[str, Any] = graph_state.values.get("discovery_usage") or {}
+
+        capped = False
         async with get_session() as bg_session:
             await _persist_candidates(bg_session, project_id, run_id, candidate_papers)
             await _update_run_state(bg_session, run_id, "awaiting_approval")
+            # Record the Librarian's LLM usage so the per-project cost cap
+            # (NFR-5) sees Phase-1 spend, mirroring _handle_gate_pause for
+            # Phase 2 and _handle_section_gate_pause for Phase 4.
+            if usage:
+                await _write_audit(
+                    bg_session,
+                    project_id=project_id,
+                    workflow_run_id=run_id,
+                    actor="librarian",
+                    action="agent.invoke",
+                    payload={"agent": "librarian", "llm_calls": 1},
+                    model=usage.get("model"),
+                    tokens_in=usage.get("tokens_in"),
+                    tokens_out=usage.get("tokens_out"),
+                    cost_usd=usage.get("cost_usd"),
+                )
+            capped = await _enforce_cost_cap(bg_session, project_id, run_id)
+            if capped:
+                await _update_run_state(bg_session, run_id, "error")
 
-        await _emit(
-            project_id,
-            {
-                "type": "approval.required",
-                "phase": Phase.DISCOVERY.value,
-                "run_id": str(run_id),
-                "summary": "Paper candidates are ready for your review.",
-            },
-        )
         await _emit(
             project_id,
             {
@@ -522,6 +536,19 @@ async def _run_graph(
                 "agent": "librarian",
                 "run_id": str(run_id),
                 "artifact_ids": [],
+            },
+        )
+        if capped:
+            # _enforce_cost_cap already emitted cost.cap_exceeded; skip the
+            # approval gate — the user must raise the cap before continuing.
+            return
+        await _emit(
+            project_id,
+            {
+                "type": "approval.required",
+                "phase": Phase.DISCOVERY.value,
+                "run_id": str(run_id),
+                "summary": "Paper candidates are ready for your review.",
             },
         )
     except asyncio.CancelledError:

@@ -61,6 +61,9 @@ class LibrarianOutput(BaseModel):
     candidates: list[Paper]  # approved=False always
     expanded_queries: list[str]
     arxiv_categories: list[str]
+    # LLM usage from query-expansion call — written to audit_log by _run_graph
+    # so the cost cap (NFR-5) sees Phase-1 spend. None when expansion failed.
+    usage: dict[str, object] | None = None
 
 
 class Librarian(Agent[LibrarianInput, LibrarianOutput]):
@@ -72,7 +75,7 @@ class Librarian(Agent[LibrarianInput, LibrarianOutput]):
 
     async def run(self, payload: LibrarianInput) -> LibrarianOutput:
         # 1. Query expansion -------------------------------------------------
-        expansion = await self._expand_query(payload.seed_query)
+        expansion, expansion_usage = await self._expand_query(payload.seed_query)
         expanded_queries = expansion.queries
         arxiv_categories = expansion.arxiv_categories
         all_queries = [payload.seed_query, *expanded_queries]
@@ -112,17 +115,21 @@ class Librarian(Agent[LibrarianInput, LibrarianOutput]):
             candidates=trimmed,
             expanded_queries=expanded_queries,
             arxiv_categories=arxiv_categories,
+            usage=expansion_usage,
         )
 
     # ------------------------------------------------------------------
     # Private helpers
     # ------------------------------------------------------------------
 
-    async def _expand_query(self, seed_query: str) -> ExpandedSearch:
+    async def _expand_query(
+        self, seed_query: str
+    ) -> tuple[ExpandedSearch, dict[str, object] | None]:
         """Use the LLM to generate alternative queries and ArXiv categories.
 
-        Falls back to empty lists if the LLM provider is unavailable --
-        the Librarian still runs with the seed query alone (see failure modes).
+        Returns (result, telemetry) so callers can surface the LLM usage for
+        the cost cap (NFR-5). Falls back to empty lists if the LLM provider is
+        unavailable — the Librarian still runs with the seed query alone.
         """
         prompt = _EXPANSION_PROMPT_TEMPLATE.format(n=4, seed_query=seed_query)
         try:
@@ -132,14 +139,14 @@ class Librarian(Agent[LibrarianInput, LibrarianOutput]):
                 response_mime_type="application/json",
                 response_schema=ExpandedSearch,
             )
-            text, _telemetry = await self._llm.complete(prompt, config=config)
+            text, telemetry = await self._llm.complete(prompt, config=config)
             data = json.loads(text)
             queries = [str(q) for q in data.get("queries", [])[:5]]
             categories = [str(c) for c in data.get("arxiv_categories", [])[:5]]
-            return ExpandedSearch(queries=queries, arxiv_categories=categories)
+            return ExpandedSearch(queries=queries, arxiv_categories=categories), telemetry
         except Exception as exc:
             _log.warning("librarian_expansion_failed", error=str(exc))
-            return ExpandedSearch(queries=[], arxiv_categories=[])
+            return ExpandedSearch(queries=[], arxiv_categories=[]), None
 
 
 # ---------------------------------------------------------------------------

@@ -120,6 +120,9 @@ async def node_discover(state: GraphState) -> GraphState:
         "candidates": [p.model_dump(mode="json") for p in result.candidates],
         "expanded_queries": result.expanded_queries,
         "workflow_telemetry": telemetry,
+        # Surface query-expansion LLM usage so _run_graph can write it to
+        # audit_log and apply the cost cap (NFR-5) before requesting approval.
+        "discovery_usage": result.usage,
         "awaiting_approval": False,  # gate node sets this
     }
 

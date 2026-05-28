@@ -36,6 +36,9 @@ class GraphState(TypedDict, total=False):
     matrix: dict[str, Any] | None
     summary: dict[str, Any] | None
     synthesis_approval: str | None
+    # Token/cost rollup for the Librarian query-expansion call — written to
+    # audit_log by _run_graph so the cost cap (NFR-5) sees Phase-1 spend.
+    discovery_usage: dict[str, Any] | None
     # Token/cost rollup for the Critic run — written to audit_log (BRD FR-3.3).
     synthesis_usage: dict[str, Any] | None
 
