@@ -24,6 +24,7 @@ workflow REST endpoint.
 from __future__ import annotations
 
 import re
+import time
 from datetime import UTC, datetime
 from typing import Any, cast
 from uuid import uuid4
@@ -375,6 +376,7 @@ async def node_draft_section(state: GraphState) -> GraphState:
     ]
 
     scribe = Scribe()
+    _draft_start = time.perf_counter()
     result = await scribe.run(
         ScribeInput(
             section=section,  # type: ignore[arg-type]
@@ -384,6 +386,13 @@ async def node_draft_section(state: GraphState) -> GraphState:
             workflow_telemetry=dict(state.get("workflow_telemetry") or {}),
         )
     )
+    draft_ms = int((time.perf_counter() - _draft_start) * 1000)
+
+    # Carry the per-section drafting latency (NFR-6 / §9 success metric) on the
+    # usage dict so the section gate handler can write it to the
+    # phase_4.section_ready audit row without a second timing source.
+    usage_payload = result.usage.model_dump(mode="json")
+    usage_payload["draft_ms"] = draft_ms
 
     # Replace any prior draft for this section (reject re-run path) or append.
     drafts: list[dict[str, Any]] = [d for d in prior_sections_state if d.get("section") != section]
@@ -405,7 +414,8 @@ async def node_draft_section(state: GraphState) -> GraphState:
         # handler can write it to audit_log and the per-project cost cap
         # (NFR-5) can see Phase-4 spend, not just Phase-2. Overwritten on each
         # section draft; the gate handler persists it before the next draft.
-        "drafting_usage": result.usage.model_dump(mode="json"),
+        # Includes draft_ms (per-section latency) for Phase-4 telemetry.
+        "drafting_usage": usage_payload,
         # Reset on each draft so the gate sees a fresh decision.
         "section_approval": None,
         # Clear feedback so a later approve doesn't accidentally re-inject it.

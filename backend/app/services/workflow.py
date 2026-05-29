@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, TypedDict
 from uuid import UUID, uuid4
 
 from fastapi import HTTPException, status
@@ -631,12 +631,113 @@ _NEXT_PHASE_AFTER_GATE: dict[str, Phase] = {
 }
 
 
+async def record_citation_correction(
+    session: AsyncSession,
+    *,
+    project_id: UUID,
+    run_id: UUID,
+    user_id: UUID,
+    label: str,
+    corrections: dict[str, str],
+    reason: str | None,
+) -> None:
+    """Audit a human citation correction (FR-1.5) as ``user.citation_correction``.
+
+    The actual content rewrite happens in the route (via
+    citations.apply_citation_corrections); this records the *decision* so the
+    audit appendix shows exactly which keys the human changed and why.
+    """
+    await _write_audit(
+        session,
+        project_id=project_id,
+        workflow_run_id=run_id,
+        actor="user",
+        action="user.citation_correction",
+        payload={
+            "user_id": str(user_id),
+            "section": label,
+            "corrections": corrections,
+            "reason": reason,
+        },
+    )
+
+
+class DraftingTelemetry(TypedDict):
+    sections_drafted: int
+    regenerations: int
+    overrides: int
+    citation_corrections: int
+    avg_section_ms: int | None
+
+
+async def drafting_telemetry(session: AsyncSession, project_id: UUID) -> DraftingTelemetry:
+    """Phase-4 telemetry rollup from audit_log (NFR-6 / BRD §9). No new table.
+
+    - sections_drafted     = count of ``phase_4.section_ready`` rows.
+    - regenerations        = ``user.reject`` rows whose payload.phase=='drafting'.
+    - overrides            = count of ``user.override`` rows.
+    - citation_corrections = count of ``user.citation_correction`` rows.
+    - avg_section_ms       = mean of ``draft_ms`` over section_ready rows.
+
+    The audit log per project is small, so the reject/phase filter and the
+    draft_ms mean are computed in Python rather than with dialect-specific
+    JSON SQL — keeps it portable across SQLite (tests) and Postgres (prod).
+    """
+    rows = (
+        await session.execute(
+            select(AuditLogRow.action, AuditLogRow.payload).where(
+                AuditLogRow.project_id == project_id,
+                AuditLogRow.action.in_(
+                    [
+                        "phase_4.section_ready",
+                        "user.reject",
+                        "user.override",
+                        "user.citation_correction",
+                    ]
+                ),
+            )
+        )
+    ).all()
+
+    sections_drafted = 0
+    regenerations = 0
+    overrides = 0
+    citation_corrections = 0
+    draft_ms_values: list[int] = []
+    for action, payload in rows:
+        data = payload if isinstance(payload, dict) else {}
+        if action == "phase_4.section_ready":
+            sections_drafted += 1
+            ms = data.get("draft_ms")
+            if isinstance(ms, int):
+                draft_ms_values.append(ms)
+        elif action == "user.reject":
+            if data.get("phase") == "drafting":
+                regenerations += 1
+        elif action == "user.override":
+            overrides += 1
+        elif action == "user.citation_correction":
+            citation_corrections += 1
+
+    avg_section_ms = round(sum(draft_ms_values) / len(draft_ms_values)) if draft_ms_values else None
+    return {
+        "sections_drafted": sections_drafted,
+        "regenerations": regenerations,
+        "overrides": overrides,
+        "citation_corrections": citation_corrections,
+        "avg_section_ms": avg_section_ms,
+    }
+
+
 async def approve_workflow(
     session: AsyncSession,
     project_id: UUID,
     run_id: UUID,
     user_id: UUID,
     feedback: str | None = None,
+    *,
+    forced_unresolved: bool = False,
+    override_reason: str | None = None,
 ) -> WorkflowRun:
     """Resume the graph with an approve command.
 
@@ -706,17 +807,24 @@ async def approve_workflow(
         next_phase = _NEXT_PHASE_AFTER_GATE.get(run.phase)
 
     await _update_run_state(session, run_id, "approved", new_phase=next_phase)
+    approve_payload: dict[str, object] = {
+        "user_id": str(user_id),
+        "feedback": feedback,
+        "phase": run.phase,
+    }
+    # FR-1.5 audited escape hatch: if the reviewer knowingly approved a section
+    # with unresolved citations, record the bypass + their reason so it is
+    # fully traceable in the audit appendix.
+    if forced_unresolved:
+        approve_payload["forced_unresolved"] = True
+        approve_payload["override_reason"] = override_reason
     await _write_audit(
         session,
         project_id=project_id,
         workflow_run_id=run_id,
         actor="user",
         action="user.approve",
-        payload={
-            "user_id": str(user_id),
-            "feedback": feedback,
-            "phase": run.phase,
-        },
+        payload=approve_payload,
     )
     if phase_specific_audit is not None:
         # The phase_1.approved_pool audit row is the canonical proof that
@@ -878,6 +986,12 @@ async def reject_workflow(
     """
     await _assert_awaiting(session, run_id)
 
+    # Capture the phase at reject time so telemetry can distinguish a drafting
+    # regeneration (NFR-6 / §9 "regenerate count per section") from a
+    # discovery/synthesis reject. Read before the state flip below.
+    rejecting_run = await session.get(WorkflowRunRow, run_id)
+    reject_phase = rejecting_run.phase if rejecting_run is not None else None
+
     await _update_run_state(session, run_id, "rejected")
     await _write_audit(
         session,
@@ -885,7 +999,7 @@ async def reject_workflow(
         workflow_run_id=run_id,
         actor="user",
         action="user.reject",
-        payload={"user_id": str(user_id), "feedback": feedback},
+        payload={"user_id": str(user_id), "feedback": feedback, "phase": reject_phase},
     )
     # Flush for background reject task — named helper per the commit-ownership contract.
     await flush_for_background_dispatch(session)
@@ -1243,13 +1357,18 @@ async def _handle_section_gate_pause(
         if artifact is not None:
             await _persist_artifacts(bg_session, project_id, run_id, [artifact])
         await _update_run_state(bg_session, run_id, "awaiting_approval", Phase.DRAFTING)
+        section_ready_payload: dict[str, Any] = {"section": section}
+        # Per-section drafting latency (NFR-6 / §9). node_draft_section stashes
+        # it on the usage dict; surface it so /usage can roll up avg_section_ms.
+        if "draft_ms" in usage:
+            section_ready_payload["draft_ms"] = usage["draft_ms"]
         await _write_audit(
             bg_session,
             project_id=project_id,
             workflow_run_id=run_id,
             actor="system",
             action="phase_4.section_ready",
-            payload={"section": section},
+            payload=section_ready_payload,
         )
         # Record the Scribe's LLM usage so the per-project cost cap (NFR-5)
         # sees Phase-4 spend, mirroring the Critic usage write in

@@ -39,11 +39,29 @@ class FeedbackPayload(BaseModel):
     feedback: str | None = Field(default=None, max_length=_MAX_FEEDBACK_CHARS)
 
 
+class ApprovePayload(BaseModel):
+    """Approve payload. `feedback` carries optional reviewer notes; the two new
+    fields (FR-1.5) let a reviewer knowingly approve a section that still has
+    unresolved citations — an audited escape hatch from the default block."""
+
+    feedback: str | None = Field(default=None, max_length=_MAX_FEEDBACK_CHARS)
+    # Approve despite unresolved citation keys (default: block). Additive.
+    force_unresolved: bool = False
+    # Required-in-spirit when force_unresolved is set: why the bypass is OK.
+    override_reason: str | None = Field(default=None, max_length=_MAX_FEEDBACK_CHARS)
+
+
 class OverridePayload(BaseModel):
     artifact_kind: ArtifactKindIn
     label: str = Field(..., min_length=1, max_length=_MAX_LABEL_CHARS)
     content: str = Field(..., min_length=1, max_length=_MAX_OVERRIDE_CONTENT_CHARS)
     mime_type: str = Field(default="text/markdown", max_length=_MAX_MIME_CHARS)
+    # FR-1.5: replace malformed citation keys before approving. Optional/additive.
+    # Map of {bad_key: approved_key}; applied to `content` and audited as a
+    # human citation correction.
+    citation_corrections: dict[str, str] | None = None
+    # Free-text rationale for the manual edit (audited).
+    override_reason: str | None = Field(default=None, max_length=_MAX_FEEDBACK_CHARS)
 
 
 @router.post(
@@ -72,9 +90,15 @@ async def get_workflow(project_id: UUID, user: CurrentUser, db: DbSession) -> Wo
 
 @router.post("/approve", response_model=WorkflowRun)
 async def approve(
-    project_id: UUID, payload: FeedbackPayload, user: CurrentUser, db: DbSession
+    project_id: UUID, payload: ApprovePayload, user: CurrentUser, db: DbSession
 ) -> WorkflowRun:
-    """Approve the pending phase and advance the workflow (SPEC.md §7)."""
+    """Approve the pending phase and advance the workflow (SPEC.md §7).
+
+    FR-1.5 citation guard: when approving a *drafting* section, if the current
+    draft cites keys not in the approved pool, the approve is BLOCKED (409
+    unresolved_citations) unless the caller sets force_unresolved=true with an
+    override_reason — which is recorded for audit.
+    """
     await _assert_project_owned(db, project_id, user.id)
     run = await wf_svc.get_active_run(db, project_id)
     if run is None:
@@ -84,7 +108,35 @@ async def approve(
             status.HTTP_409_CONFLICT,
             detail={"code": "phase_locked", "message": "Workflow is not awaiting approval."},
         )
-    return await wf_svc.approve_workflow(db, project_id, run.id, user.id, payload.feedback)
+
+    # Citation guard — only meaningful in the drafting phase (sections cite).
+    # Checks the most-recent section draft (the one awaiting this approval).
+    if run.phase == "drafting":
+        from app.services.citations import latest_section_unresolved
+
+        unresolved = await latest_section_unresolved(db, project_id)
+        if unresolved and not payload.force_unresolved:
+            raise HTTPException(
+                status.HTTP_409_CONFLICT,
+                detail={
+                    "code": "unresolved_citations",
+                    "message": (
+                        "This section cites keys not in the approved pool. Fix them, "
+                        "or approve with force_unresolved + override_reason."
+                    ),
+                    "keys": unresolved,
+                },
+            )
+
+    return await wf_svc.approve_workflow(
+        db,
+        project_id,
+        run.id,
+        user.id,
+        payload.feedback,
+        forced_unresolved=payload.force_unresolved,
+        override_reason=payload.override_reason,
+    )
 
 
 @router.post("/reject", response_model=WorkflowRun)
@@ -123,6 +175,24 @@ async def override(
             status.HTTP_409_CONFLICT,
             detail={"code": "phase_locked", "message": "Workflow is not awaiting approval."},
         )
+
+    # FR-1.5 citation correction: replace any malformed `[@bad]` markers with the
+    # reviewer-chosen valid `[@good]` keys, then record the human edit for audit.
+    content = payload.content
+    if payload.citation_corrections:
+        from app.services.citations import apply_citation_corrections
+
+        content = apply_citation_corrections(content, payload.citation_corrections)
+        await wf_svc.record_citation_correction(
+            db,
+            project_id=project_id,
+            run_id=run.id,
+            user_id=user.id,
+            label=payload.label,
+            corrections=payload.citation_corrections,
+            reason=payload.override_reason,
+        )
+
     return await wf_svc.override_workflow(
         db,
         project_id=project_id,
@@ -130,7 +200,7 @@ async def override(
         user_id=user.id,
         artifact_kind=payload.artifact_kind,
         label=payload.label,
-        content=payload.content,
+        content=content,
         mime_type=payload.mime_type,
     )
 

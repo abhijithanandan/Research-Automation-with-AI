@@ -1,6 +1,6 @@
 # Technical Specification — ResearchFlow AI
 
-**Version:** 0.1 (Pre-MVP)
+**Version:** 0.2 (Pre-MVP) — adds the Phase-4 Feature Pack contract (Export Pack FR-3.5, Citation Manager v1 FR-1.5, Phase-4 telemetry NFR-6/§9). All additions are additive and non-breaking.
 **Status:** Source of truth for implementation. Code must match this document. Update this document *before* changing a contract.
 
 This is the **spec-driven development sheet**. Every endpoint, data model, event, and state transition the team will implement is captured here. Updates to a contract require a PR to this file with reviewer sign-off *before* implementation work begins.
@@ -252,15 +252,31 @@ The canonical machine-readable form lives in [`docs/api/openapi.yaml`](./docs/ap
 { "feedback": "Tighten Section 2; remove paragraph about transformers." }
 ```
 
+The approve payload also accepts two optional, additive fields used by the
+Citation Manager (FR-1.5) at the **section** gate:
+```json
+{ "feedback": "...", "force_unresolved": false, "override_reason": "intentional placeholder" }
+```
+**Unresolved-citation block.** When approving a drafting section, if the latest
+draft cites keys not in the approved pool, the approve is rejected with
+`409 { code: "unresolved_citations", keys: [...] }` unless `force_unresolved: true`
+is set with an `override_reason`. A forced approve records `forced_unresolved` +
+`override_reason` on the `user.approve` audit row so the bypass is auditable.
+
 **Override payload**
 ```json
 {
   "artifact_kind": "section",
   "label": "introduction",
   "content": "## Introduction\n\nThe edited markdown...",
-  "mime_type": "text/markdown"
+  "mime_type": "text/markdown",
+  "citation_corrections": { "smith2020": "lecun2015" },
+  "override_reason": "fixed hallucinated key"
 }
 ```
+`citation_corrections` and `override_reason` are optional (FR-1.5). When present, each
+`{bad: good}` rewrites the exact `[@bad]` marker to `[@good]` in `content` before the
+override is applied, and a `user.citation_correction` audit row records the human edit.
 
 ### 3.4 Papers
 
@@ -275,16 +291,43 @@ The canonical machine-readable form lives in [`docs/api/openapi.yaml`](./docs/ap
 
 | Method | Path | Description |
 | --- | --- | --- |
+| Method | Path | Description |
+| --- | --- | --- |
 | GET | `/projects/{id}/artifacts?kind={kind}` | List artifacts, optionally filtered. |
 | GET | `/projects/{id}/artifacts/{artifact_id}` | Fetch a single artifact. |
-| GET | `/projects/{id}/export?format=markdown\|latex\|bibtex` | Export the manuscript. |
+| GET | `/projects/{id}/export?format=markdown\|bibtex\|package\|bundle` | Export the manuscript (FR-3.5). See below. |
+| GET | `/projects/{id}/drafting/citations?section={section}` | Citation Manager v1 (FR-1.5): resolve a section's cited keys against the approved pool. |
+
+**Export formats (FR-3.5).** Requires a `kind="manuscript"` artifact (Phase 4 done);
+otherwise `409 { code: "manuscript_not_ready" }`. Each returns a downloadable file
+(`Content-Disposition: attachment`) and writes an `export.generated` audit row.
+
+- `markdown` — the assembled manuscript text (`text/markdown`).
+- `bibtex` — references built from the **approved pool only** (FR-2.4 invariant), `application/x-bibtex`.
+- `package` — a ZIP (`application/zip`) of separate files under `<slug>/`: `manuscript.md`,
+  `references.bib`, `ai-disclosure.md`, `audit-appendix.md` (the BRD §10 disclosure/audit appendix).
+- `bundle` — one combined markdown file with all of the above (`text/markdown`).
+
+LaTeX is **not** a valid format; a `latex` value is an ordinary `422` validation error.
 
 ### 3.6 Audit & telemetry
 
 | Method | Path | Description |
 | --- | --- | --- |
 | GET | `/projects/{id}/audit` | Paginated audit log (newest first). |
-| GET | `/projects/{id}/usage` | Token + cost rollup for the project. |
+| GET | `/projects/{id}/usage` | Token + cost rollup + additive `drafting{}` Phase-4 telemetry block. |
+
+**`/usage` response.** The base `{ tokens_in, tokens_out, cost_usd }` rollup gains an
+additive `drafting{}` block (NFR-6 / §9 success metrics), derived from `audit_log`:
+```json
+{ "tokens_in": 0, "tokens_out": 0, "cost_usd": 0.0,
+  "drafting": { "sections_drafted": 7, "regenerations": 3, "overrides": 1,
+                "citation_corrections": 2, "avg_section_ms": 8421 } }
+```
+- `sections_drafted` — `phase_4.section_ready` rows. `regenerations` — `user.reject` rows
+  with `payload.phase == "drafting"`. `overrides` — `user.override` rows.
+  `citation_corrections` — `user.citation_correction` rows. `avg_section_ms` — mean of
+  `draft_ms` on `phase_4.section_ready` rows (`null` if none recorded).
 
 ### 3.7 Error format
 
@@ -298,7 +341,7 @@ All errors return:
   }
 }
 ```
-Standard codes: `unauthorized` (401), `forbidden` (403), `not_found` (404), `validation_error` (422), `phase_locked` (409), `token_cap_reached` (402), `provider_error` (502).
+Standard codes: `unauthorized` (401), `forbidden` (403), `not_found` (404), `validation_error` (422), `phase_locked` (409), `token_cap_reached` (402), `provider_error` (502), `manuscript_not_ready` (409, export before Phase 4 done), `unresolved_citations` (409, section approve blocked on hallucinated citation keys).
 
 ---
 
@@ -457,6 +500,13 @@ The HITL handshake is the system's most safety-critical mechanism. Implementatio
 2. The REST `approve` / `reject` / `override` endpoints look up the active `WorkflowRun`, verify it is in state `awaiting_approval`, and dispatch the corresponding LangGraph command. Any other state returns 409 `phase_locked`.
 3. Every approval action writes an `audit_log` entry with `actor: "user"` and the user's UID in the payload.
 4. The frontend may not advance its local view until it receives a `state.changed` WS event reflecting the new phase. (No optimistic UI for gate transitions.)
+5. **Citation guard (FR-1.5).** At the section gate, `approve` is blocked with
+   `409 unresolved_citations` when the latest draft cites keys outside the approved
+   pool, unless `force_unresolved: true` + `override_reason` is supplied (audited).
+   `override` may carry `citation_corrections` to rewrite `[@bad]`→`[@good]` markers,
+   recorded as a `user.citation_correction` audit row. This realises BRD risk #1's
+   "post-generation validator rejects unknown citation keys" as a hard gate, not just
+   a regeneration nudge.
 
 ---
 
