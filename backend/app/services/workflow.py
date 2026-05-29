@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import UTC, datetime
-from typing import Any, TypedDict
+from typing import Any
 from uuid import UUID, uuid4
 
 from fastapi import HTTPException, status
@@ -21,6 +21,7 @@ from langgraph.types import Command
 from sqlalchemy import select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
+from typing_extensions import TypedDict
 
 from app.db.session import flush_for_background_dispatch
 from app.graph.state import GraphState

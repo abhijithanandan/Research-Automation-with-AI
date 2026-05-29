@@ -12,11 +12,11 @@ state — unit-testable against a plain DB.
 
 from __future__ import annotations
 
-from typing import TypedDict
 from uuid import UUID
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+from typing_extensions import TypedDict
 
 from app.agents.scribe import _extract_cited_keys
 from app.models.db import ArtifactRow, PaperRow
