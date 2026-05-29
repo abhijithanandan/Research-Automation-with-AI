@@ -7,6 +7,7 @@ awaiting_approval on interrupt, and to error only on a real exception.
 
 from __future__ import annotations
 
+import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
 
@@ -124,3 +125,83 @@ async def test_run_graph_does_not_emit_approval_on_error() -> None:
 
     assert "approval.required" not in emitted_types
     assert "agent.error" in emitted_types
+
+
+# ---------------------------------------------------------------------------
+# Transient vs fatal contract (Action Board P1):
+#   - CancelledError (shutdown / task cancel) is *transient* control-flow that
+#     MUST propagate — never swallowed, never marked "error" (that would shred
+#     the run state on a clean lifespan shutdown).
+#   - A generic exception is *fatal* — marked error, surfaced via agent.error
+#     (covered by test_run_graph_sets_error_on_real_exception above).
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_run_graph_propagates_cancelled_error() -> None:
+    """CancelledError must re-raise out of _run_graph (NOT be caught as a
+    fatal error). Asserts the run is NOT marked 'error' on cancellation."""
+    run_id = uuid4()
+    update_states: list[str] = []
+
+    async def capture_state(session, rid, state):
+        update_states.append(state)
+
+    cancelling_graph = MagicMock()
+    cancelling_graph.ainvoke = AsyncMock(side_effect=asyncio.CancelledError())
+
+    with patch("app.services.workflow.get_compiled_graph", return_value=cancelling_graph):
+        with patch("app.services.workflow._emit", new_callable=AsyncMock):
+            with patch("app.services.workflow._update_run_state", side_effect=capture_state):
+                with patch("app.db.session.get_session") as mock_get_session:
+                    mock_session = AsyncMock()
+                    mock_ctx = MagicMock()
+                    mock_ctx.__aenter__ = AsyncMock(return_value=mock_session)
+                    mock_ctx.__aexit__ = AsyncMock(return_value=False)
+                    mock_get_session.return_value = mock_ctx
+
+                    from app.services.workflow import _run_graph
+
+                    with pytest.raises(asyncio.CancelledError):
+                        await _run_graph(run_id, TEST_PROJECT_ID, "test")
+
+    # Cancellation is shutdown, not failure — the run must NOT be marked error.
+    assert "error" not in update_states
+
+
+@pytest.mark.asyncio
+async def test_resume_graph_propagates_cancelled_error() -> None:
+    """Same transient-control-flow contract on the resume boundary."""
+    from langgraph.types import Command
+
+    run_id = uuid4()
+    update_states: list[str] = []
+
+    async def capture_state(session, rid, state, *args, **kwargs):
+        update_states.append(state)
+
+    cancelling_graph = MagicMock()
+    cancelling_graph.ainvoke = AsyncMock(side_effect=asyncio.CancelledError())
+
+    with patch("app.services.workflow._emit", new_callable=AsyncMock):
+        with patch("app.services.workflow._update_run_state", side_effect=capture_state):
+            with patch("app.db.session.get_session") as mock_get_session:
+                mock_session = AsyncMock()
+                mock_ctx = MagicMock()
+                mock_ctx.__aenter__ = AsyncMock(return_value=mock_session)
+                mock_ctx.__aexit__ = AsyncMock(return_value=False)
+                mock_get_session.return_value = mock_ctx
+
+                from app.services.workflow import _resume_graph
+
+                with pytest.raises(asyncio.CancelledError):
+                    await _resume_graph(
+                        TEST_PROJECT_ID,
+                        run_id,
+                        cancelling_graph,
+                        {"configurable": {"thread_id": str(run_id)}},
+                        Command(resume="approve"),
+                        "approved",
+                    )
+
+    assert "error" not in update_states

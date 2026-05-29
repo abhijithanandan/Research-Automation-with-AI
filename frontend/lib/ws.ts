@@ -81,7 +81,15 @@ const _NO_RECONNECT_CODES = new Set([
   4403, // our app-defined unauthorized code
 ]);
 
-function _backoffDelay(attempt: number): number {
+/** Reconnect decision for a given WS close code. Exported (test-only) so the
+ * code↔policy mapping can be asserted in isolation: auth/normal closures give
+ * up; 4429 (rate-limit) and transient transport closes retry with backoff.
+ * Mirrors the backend close-code contract (SPEC §4): 4401 auth, 4429 limit. */
+export function shouldReconnect(code: number): boolean {
+  return !_NO_RECONNECT_CODES.has(code);
+}
+
+export function _backoffDelay(attempt: number): number {
   // Exponential backoff with full jitter: delay = random(0, min(cap, base * 2^attempt))
   const expo = Math.min(_RECONNECT_MAX_MS, _RECONNECT_INITIAL_MS * 2 ** attempt);
   return Math.floor(Math.random() * expo);
@@ -141,7 +149,7 @@ export function connectProjectEvents(opts: WSOptions): ManagedSocket {
       //   - Server signalled "do not reconnect" close code → stop.
       //   - Out of retry budget → stop.
       //   - Otherwise, exponential backoff + jitter → retry.
-      if (stopped || _NO_RECONNECT_CODES.has(e.code)) return;
+      if (stopped || !shouldReconnect(e.code)) return;
       if (attempt >= _RECONNECT_MAX_ATTEMPTS) {
         opts.onReconnect?.({ attempt, nextDelayMs: null });
         return;

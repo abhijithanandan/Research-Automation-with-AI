@@ -48,7 +48,8 @@ export class ApiError extends Error {
   }
 }
 
-function classifyStatus(status: number): ApiErrorKind {
+// Exported for unit tests (lib/api.test.ts). Pure status→kind mapping.
+export function classifyStatus(status: number): ApiErrorKind {
   if (status === 401 || status === 403) return "auth";
   if (status === 404) return "not_found";
   if (status === 409) return "conflict";
@@ -64,7 +65,8 @@ interface ErrorBody {
   message?: string;
 }
 
-function extractError(status: number, body: unknown): ApiError {
+// Exported for unit tests (lib/api.test.ts). Parses both error-envelope shapes.
+export function extractError(status: number, body: unknown): ApiError {
   const e = (body ?? {}) as ErrorBody;
   // FastAPI/HTTPException uses `detail`; our app uses SPEC §3.7 `error: {code,
   // message, trace_id}`. Handle both shapes.

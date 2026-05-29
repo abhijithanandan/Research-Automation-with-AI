@@ -18,6 +18,7 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime
+from unittest.mock import patch
 from uuid import uuid4
 
 import pytest
@@ -293,3 +294,112 @@ async def test_identity_http_upsert_refreshes_profile(db_session: AsyncSession) 
     assert second.id == first.id
     assert second.email == "new@x.com"
     assert second.display_name == "New"
+
+
+# ===========================================================================
+# 6. Auth outcomes — malformed header, invalid/revoked token, ownership
+# ===========================================================================
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("header", [None, "", "Token abc", "bearer", "Basic xyz"])
+async def test_http_auth_rejects_malformed_authorization_header(header: str | None) -> None:
+    """Missing or non-Bearer Authorization headers → 401 before any token work."""
+    from fastapi import HTTPException
+
+    from app.api.deps import get_current_user
+
+    with pytest.raises(HTTPException) as exc:
+        await get_current_user(authorization=header, db=AsyncSession.__new__(AsyncSession))
+    assert exc.value.status_code == 401
+
+
+@pytest.mark.asyncio
+async def test_http_auth_rejects_invalid_or_revoked_token() -> None:
+    """When Firebase verification raises (invalid/expired/revoked token), the
+    HTTP path returns a generic 401 — never leaks which sub-failure occurred."""
+    from fastapi import HTTPException
+
+    from app.api.deps import get_current_user
+
+    with patch("app.api.deps.verify_firebase_token", side_effect=ValueError("revoked")):
+        with pytest.raises(HTTPException) as exc:
+            await get_current_user(
+                authorization="Bearer some-revoked-token",
+                db=AsyncSession.__new__(AsyncSession),
+            )
+    assert exc.value.status_code == 401
+    # Generic message — does not disclose the underlying auth-error class.
+    assert "revoked" not in str(exc.value.detail).lower()
+
+
+def test_project_ownership_mismatch_rejected() -> None:
+    """A user requesting another user's project → 403; a missing project → 404
+    (HTTP _assert_owned). Same owner_id policy the WS handshake enforces."""
+    from datetime import UTC as _UTC
+
+    from fastapi import HTTPException
+
+    from app.api.routes.projects import _assert_owned
+    from app.models.db import ProjectRow
+
+    now = datetime.now(tz=_UTC)
+    owner_id, intruder_id, project_id = uuid4(), uuid4(), uuid4()
+    row = ProjectRow(
+        id=project_id,
+        owner_id=owner_id,
+        title="t",
+        seed_query="q",
+        created_at=now,
+        updated_at=now,
+    )
+
+    # Owner passes (no raise).
+    _assert_owned(row, owner_id, project_id)
+    # Intruder is rejected with 403.
+    with pytest.raises(HTTPException) as exc:
+        _assert_owned(row, intruder_id, project_id)
+    assert exc.value.status_code == 403
+    # Missing project → 404.
+    with pytest.raises(HTTPException) as exc404:
+        _assert_owned(None, owner_id, project_id)
+    assert exc404.value.status_code == 404
+
+
+# ===========================================================================
+# 7. No sensitive auth-payload leakage in logs
+# ===========================================================================
+
+
+@pytest.mark.asyncio
+async def test_http_auth_failure_log_does_not_leak_token() -> None:
+    """The verify-failed log line must carry error_type for forensics but must
+    NOT contain the bearer token (a JWT in logs is an info-disclosure leak)."""
+    from fastapi import HTTPException
+
+    from app.api.deps import get_current_user
+
+    secret_token = "eyJhbGciOiJSUzI1NiIsSENSITIVE_JWT_PAYLOAD_xyz"
+    captured: list[dict] = []
+
+    class _CapLogger:
+        def warning(self, event, **fields):
+            captured.append({"event": event, **fields})
+
+        def __getattr__(self, _):  # info/error/etc. no-op
+            return lambda *a, **k: None
+
+    with patch("app.api.deps.verify_firebase_token", side_effect=ValueError("bad token")):
+        with patch("app.utils.logging.get_logger", return_value=_CapLogger()):
+            with pytest.raises(HTTPException):
+                await get_current_user(
+                    authorization=f"Bearer {secret_token}",
+                    db=AsyncSession.__new__(AsyncSession),
+                )
+
+    assert captured, "expected an auth-failure log line"
+    blob = repr(captured)
+    assert secret_token not in blob, "the bearer token must never appear in logs"
+    assert "SENSITIVE_JWT_PAYLOAD" not in blob
+    # But the forensic field must be present.
+    assert any(c.get("error_type") for c in captured), "error_type must be logged for triage"
