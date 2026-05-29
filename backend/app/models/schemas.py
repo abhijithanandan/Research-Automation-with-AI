@@ -18,6 +18,17 @@ class Phase(StrEnum):
     DONE = "done"
 
 
+# Single source of truth for WorkflowRun.state. The `WorkflowRun.state` Literal
+# below MUST stay in sync with this set (a test asserts it). Anything that
+# *writes* a run state (workflow service, startup cleanup, migrations) must
+# validate against this constant — never a bare string literal. A drift here
+# is exactly the bug class that shipped a non-contract "failed" state from the
+# orphan-cleanup path (audit P0).
+VALID_RUN_STATES: frozenset[str] = frozenset(
+    {"running", "awaiting_approval", "approved", "rejected", "error"}
+)
+
+
 class User(BaseModel):
     id: UUID
     email: EmailStr

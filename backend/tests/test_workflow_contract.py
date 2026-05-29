@@ -507,3 +507,122 @@ def test_graph_registers_exactly_the_expected_nodes() -> None:
     }
     actual = set(graph.nodes) - {"__start__", "__end__"}
     assert actual == expected, f"graph node set drifted: {actual ^ expected}"
+
+
+# ---------------------------------------------------------------------------
+# Suite 4 — replay / reconnect event-ordering sanity (audit P1)
+#
+# When a client reconnects mid-run it re-subscribes and gets the last
+# *significant* event replayed so its UI catches up. The invariant: a late
+# subscriber must never receive a STALE phase — it must see the most recent
+# state, not an earlier one. Guards the "stale UI phase after a gate
+# transition" regression the review flagged.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_replay_delivers_latest_significant_event_not_stale() -> None:
+    """After approval.required(synthesis) THEN state.changed(drafting), a newly
+    reconnecting subscriber must replay the *drafting* event — never regress to
+    the older synthesis phase."""
+    import app.services.workflow as wf
+
+    project_id = uuid4()
+    run_id = str(uuid4())
+    wf._last_event.pop(project_id, None)
+    wf._ws_event_bus.pop(project_id, None)
+
+    await wf._emit(
+        project_id,
+        {"type": "approval.required", "phase": "synthesis", "run_id": run_id, "summary": "s"},
+    )
+    await wf._emit(
+        project_id,
+        {"type": "state.changed", "phase": "drafting", "state": "approved", "run_id": run_id},
+    )
+
+    q = wf.subscribe_project(project_id)
+    try:
+        replayed = q.get_nowait()
+    finally:
+        wf.unsubscribe_project(project_id, q)
+
+    assert replayed["type"] == "state.changed"
+    assert replayed["phase"] == "drafting", "replay must not regress to the stale synthesis phase"
+
+
+@pytest.mark.asyncio
+async def test_replay_only_caches_significant_events() -> None:
+    """Transient events (agent.token) must NOT become the replayed catch-up
+    event — only approval.required / state.changed / agent.error /
+    cost.cap_exceeded are 'significant'."""
+    import app.services.workflow as wf
+
+    project_id = uuid4()
+    run_id = str(uuid4())
+    wf._last_event.pop(project_id, None)
+    wf._ws_event_bus.pop(project_id, None)
+
+    await wf._emit(
+        project_id,
+        {"type": "state.changed", "phase": "drafting", "state": "approved", "run_id": run_id},
+    )
+    for i in range(5):
+        await wf._emit(project_id, {"type": "agent.token", "agent": "scribe", "delta": str(i)})
+
+    q = wf.subscribe_project(project_id)
+    try:
+        replayed = q.get_nowait()
+    finally:
+        wf.unsubscribe_project(project_id, q)
+
+    assert replayed["type"] == "state.changed", "transient agent.token must not be the replay event"
+
+
+@pytest.mark.asyncio
+async def test_emit_fans_out_to_all_live_subscribers() -> None:
+    """A live event reaches every connected subscriber (multi-tab/reconnect
+    fan-out) so no open tab is left on a stale phase."""
+    import app.services.workflow as wf
+
+    project_id = uuid4()
+    run_id = str(uuid4())
+    wf._last_event.pop(project_id, None)
+    wf._ws_event_bus.pop(project_id, None)
+
+    q1 = wf.subscribe_project(project_id)
+    q2 = wf.subscribe_project(project_id)
+    try:
+        await wf._emit(
+            project_id,
+            {"type": "state.changed", "phase": "done", "state": "approved", "run_id": run_id},
+        )
+        e1 = q1.get_nowait()
+        e2 = q2.get_nowait()
+    finally:
+        wf.unsubscribe_project(project_id, q1)
+        wf.unsubscribe_project(project_id, q2)
+
+    assert e1["phase"] == "done"
+    assert e2["phase"] == "done"
+
+
+@pytest.mark.asyncio
+async def test_replay_event_carries_contract_valid_phase_and_state() -> None:
+    """Any replayed state.changed must carry a real Phase value and a
+    contract-valid run state — a stale/garbage cached event would desync UI."""
+    import app.services.workflow as wf
+    from app.models.schemas import VALID_RUN_STATES
+
+    valid_phases = {p.value for p in Phase}
+    project_id = uuid4()
+    wf._last_event.pop(project_id, None)
+    wf._ws_event_bus.pop(project_id, None)
+
+    await wf._emit(
+        project_id,
+        {"type": "state.changed", "phase": "drafting", "state": "approved", "run_id": str(uuid4())},
+    )
+    cached = wf._last_event[project_id]
+    assert cached["phase"] in valid_phases
+    assert cached["state"] in VALID_RUN_STATES

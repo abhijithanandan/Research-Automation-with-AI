@@ -58,12 +58,20 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     )
 
     async def _cleanup_orphaned_runs() -> None:
+        # A run left in "running" across a restart is orphaned — its in-process
+        # background task died with the old process. Move it to the
+        # contract-valid terminal-failure state "error" (NOT "failed", which is
+        # NOT in VALID_RUN_STATES — that bug shipped before the audit P0 fix).
+        from app.models.schemas import VALID_RUN_STATES
+
+        orphan_state = "error"
+        assert orphan_state in VALID_RUN_STATES  # guard the literal at write time
         try:
             async with get_session() as session:
                 await session.execute(
                     update(WorkflowRunRow)
                     .where(WorkflowRunRow.state == "running")
-                    .values(state="failed")
+                    .values(state=orphan_state)
                 )
             _log.info("cleaned_up_orphaned_workflow_runs")
         except Exception as exc:

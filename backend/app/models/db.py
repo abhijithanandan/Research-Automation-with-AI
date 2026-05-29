@@ -9,6 +9,7 @@ from uuid import UUID, uuid4
 from sqlalchemy import (
     JSON,
     TIMESTAMP,
+    CheckConstraint,
     ForeignKey,
     Index,
     Numeric,
@@ -73,6 +74,12 @@ class WorkflowRunRow(Base):
             # wraps a literal SQL fragment that both dialects accept.
             postgresql_where=text("state IN ('running', 'awaiting_approval')"),
             sqlite_where=text("state IN ('running', 'awaiting_approval')"),
+        ),
+        # DB-level state-contract guard (mirrors alembic 0007 + VALID_RUN_STATES).
+        # Present on the ORM so test DBs built via create_all() enforce it too.
+        CheckConstraint(
+            "state IN ('running', 'awaiting_approval', 'approved', 'rejected', 'error')",
+            name="ck_workflow_runs_state_valid",
         ),
     )
 

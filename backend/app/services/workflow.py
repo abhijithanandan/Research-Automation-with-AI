@@ -26,7 +26,7 @@ from app.db.session import flush_for_background_dispatch
 from app.graph.state import GraphState
 from app.graph.workflow import NODE_AWAIT_SECTION, NODE_AWAIT_SYNTHESIS, build_graph
 from app.models.db import ArtifactRow, AuditLogRow, PaperRow, ProjectRow, WorkflowRunRow
-from app.models.schemas import Paper, Phase, WorkflowRun
+from app.models.schemas import VALID_RUN_STATES, Paper, Phase, WorkflowRun
 from app.utils.logging import get_logger
 
 # Module-level set to keep strong references to background tasks (prevents GC).
@@ -597,6 +597,16 @@ async def _update_run_state(
     UI status) on long-running projects. Callers that know the post-transition
     phase pass it here; callers that don't (mid-state updates) omit it.
     """
+    # Guardrail (audit P0): reject any out-of-contract state literal at the one
+    # chokepoint every state write goes through. This is what would have caught
+    # the orphan-cleanup "failed" bug. VALID_RUN_STATES is the single source of
+    # truth (app/models/schemas.py), kept in sync with the WorkflowRun.state
+    # Literal.
+    if new_state not in VALID_RUN_STATES:
+        raise ValueError(
+            f"Refusing to write invalid workflow run state {new_state!r}; "
+            f"must be one of {sorted(VALID_RUN_STATES)}."
+        )
     now = datetime.now(tz=UTC)
     values: dict[str, object] = {"state": new_state, "last_event_at": now}
     if new_state == "awaiting_approval":

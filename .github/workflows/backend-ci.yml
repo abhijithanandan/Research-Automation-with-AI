@@ -46,5 +46,11 @@ jobs:
       - name: Mypy
         run: mypy app
 
-      - name: Pytest
+      - name: State-contract smoke (fail fast on illegal workflow states)
+        # Runs the run-state contract + workflow gate matrix first so a
+        # contract violation (e.g. a non-VALID_RUN_STATES literal) blocks the
+        # build in seconds, before the full suite.
+        run: pytest -q tests/test_state_contract.py tests/test_workflow_contract.py
+
+      - name: Pytest (full suite incl. security regression)
         run: pytest -q
