@@ -145,7 +145,15 @@ class Librarian(Agent[LibrarianInput, LibrarianOutput]):
             categories = [str(c) for c in data.get("arxiv_categories", [])[:5]]
             return ExpandedSearch(queries=queries, arxiv_categories=categories), telemetry
         except Exception as exc:
-            _log.warning("librarian_expansion_failed", error=str(exc))
+            # Broad by necessity: the LLM SDK (Gemini/Anthropic) raises a wide,
+            # undocumented error family on quota/transport/schema failures, and
+            # query expansion must degrade to seed-only rather than sink the
+            # run. error_type makes the defect *class* queryable in logs.
+            _log.warning(
+                "librarian_expansion_failed",
+                error_type=type(exc).__name__,
+                error=str(exc),
+            )
             return ExpandedSearch(queries=[], arxiv_categories=[]), None
 
 

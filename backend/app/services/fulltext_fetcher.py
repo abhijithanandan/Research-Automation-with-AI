@@ -129,7 +129,9 @@ class FullTextFetcher:
                 except VectorStoreUnavailableError as exc:
                     # If the vector store is down we just stop — the Critic
                     # has its own VectorStoreUnavailable handling.
-                    _log.warning("fulltext_embed_failed", error=str(exc))
+                    _log.warning(
+                        "fulltext_embed_failed", error_type=type(exc).__name__, error=str(exc)
+                    )
                     return ingested
 
         return ingested
@@ -192,6 +194,7 @@ class FullTextFetcher:
                 "fulltext_download_failed",
                 citation_key=citation_key,
                 url=url,
+                error_type=type(exc).__name__,
                 error=str(exc),
             )
             return None
@@ -240,7 +243,12 @@ class FullTextFetcher:
         try:
             reader = PdfReader(io.BytesIO(pdf_bytes))
         except Exception as exc:
-            _log.warning("fulltext_pdf_parse_failed", citation_key=citation_key, error=str(exc))
+            _log.warning(
+                "fulltext_pdf_parse_failed",
+                citation_key=citation_key,
+                error_type=type(exc).__name__,
+                error=str(exc),
+            )
             return ""
         pages: list[str] = []
         for page in reader.pages:

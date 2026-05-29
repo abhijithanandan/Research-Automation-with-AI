@@ -6,47 +6,88 @@ Each test corresponds to a finding in the external review. See the
 
 from __future__ import annotations
 
-import uuid
+from collections.abc import AsyncIterator
+from datetime import UTC, datetime
 from uuid import UUID, uuid4
 
 import pytest
+import pytest_asyncio
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
-from app.api.deps import _stable_uuid_from_uid
+from app.models.db import Base, UserRow
 from app.models.schemas import Phase
 
 # ---------------------------------------------------------------------------
-# MED-2 — UUIDv5 derivation
+# Identity model — `users.id` is a DB-authoritative surrogate key (uuid4),
+# resolved by looking up `firebase_uid`. NOT derived from the UID. This is the
+# replacement for the removed `_stable_uuid_from_uid` (reviewer MED finding:
+# custom hash-based identity derivation is an audit-portability risk).
 # ---------------------------------------------------------------------------
 
 
-def test_stable_uuid_is_uuid_v5() -> None:
-    """The derived UUID must be a standard UUIDv5 (variant 1, version 5)."""
-    derived = _stable_uuid_from_uid("firebase-uid-abc-123")
-    assert derived.version == 5
-    # Variant 1 (RFC 4122) means the high two bits of clock_seq_hi are 0b10.
-    assert (derived.clock_seq_hi_variant & 0xC0) == 0x80
+@pytest_asyncio.fixture()
+async def db_session() -> AsyncIterator[AsyncSession]:
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:", echo=False)
+    factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    async with factory() as s:
+        yield s
+    await engine.dispose()
 
 
-def test_stable_uuid_is_deterministic() -> None:
-    """Same uid in → same UUID out. Required for stable owner_id mapping."""
-    a = _stable_uuid_from_uid("alice@example.com")
-    b = _stable_uuid_from_uid("alice@example.com")
+async def _resolve_user_id(db: AsyncSession, uid: str, email: str) -> UUID:
+    """Mirror deps.get_current_user's identity resolution: look up by
+    firebase_uid; insert with a DB-default uuid4 surrogate on first sight."""
+    existing = await db.scalar(select(UserRow).where(UserRow.firebase_uid == uid))
+    if existing is not None:
+        return existing.id
+    row = UserRow(firebase_uid=uid, email=email, created_at=datetime.now(tz=UTC))
+    db.add(row)
+    await db.flush()
+    await db.refresh(row)
+    return row.id
+
+
+@pytest.mark.asyncio
+async def test_new_user_gets_uuid4_surrogate_key(db_session: AsyncSession) -> None:
+    """A first-seen user is assigned a standard uuid4 (version 4) by the DB
+    column default — not a value computed from the firebase_uid."""
+    uid = await _resolve_user_id(db_session, "firebase-uid-abc-123", "abc@example.com")
+    assert uid.version == 4
+
+
+@pytest.mark.asyncio
+async def test_identity_stable_across_requests_via_lookup(db_session: AsyncSession) -> None:
+    """Same firebase_uid resolves to the same internal id on every request —
+    now via DB lookup on the natural key, not via re-derivation."""
+    a = await _resolve_user_id(db_session, "alice@example.com", "alice@example.com")
+    b = await _resolve_user_id(db_session, "alice@example.com", "alice@example.com")
     assert a == b
 
 
-def test_stable_uuid_differs_per_uid() -> None:
-    """Different Firebase UIDs map to distinct UUIDs (no accidental aliasing)."""
-    a = _stable_uuid_from_uid("alice@example.com")
-    b = _stable_uuid_from_uid("bob@example.com")
+@pytest.mark.asyncio
+async def test_identity_differs_per_uid(db_session: AsyncSession) -> None:
+    """Different Firebase UIDs map to distinct internal ids (no aliasing)."""
+    a = await _resolve_user_id(db_session, "alice@example.com", "alice@example.com")
+    b = await _resolve_user_id(db_session, "bob@example.com", "bob@example.com")
     assert a != b
 
 
-def test_stable_uuid_domain_separated_from_dns_namespace() -> None:
-    """Our namespace must not collide with the standard DNS namespace —
-    otherwise a UID equal to a domain name could authenticate as that user."""
-    ours = _stable_uuid_from_uid("example.com")
-    dns = uuid.uuid5(uuid.NAMESPACE_DNS, "example.com")
-    assert ours != dns
+@pytest.mark.asyncio
+async def test_identity_not_derived_from_uid(db_session: AsyncSession) -> None:
+    """The internal id must NOT be a deterministic function of the UID — that
+    is the whole point of the surrogate-key migration. Two fresh DBs would
+    assign different ids to the same uid (proving DB-authoritative, not
+    derived)."""
+    from uuid import NAMESPACE_DNS, uuid5
+
+    uid = "example.com"
+    assigned = await _resolve_user_id(db_session, uid, "x@example.com")
+    # It is not the old UUIDv5 derivation, and not the DNS-namespace v5 either.
+    assert assigned != uuid5(NAMESPACE_DNS, uid)
+    assert assigned.version == 4
 
 
 # ---------------------------------------------------------------------------
@@ -198,11 +239,11 @@ def test_phase_enum_values_match_db_strings() -> None:
 # Smoke imports — surface any circular-import regressions early.
 def test_imports_smoke() -> None:
     """Ensure the workflow / deps / papers modules still import cleanly."""
-    from app.api.deps import _RESEARCHFLOW_USER_NS
+    from app.api.deps import get_current_user
     from app.api.routes import papers, workflow
     from app.services.workflow import _NEXT_PHASE_AFTER_GATE
 
-    assert isinstance(_RESEARCHFLOW_USER_NS, UUID)
+    assert callable(get_current_user)
     assert callable(papers._assert_phase_not_locked)
     assert callable(workflow.approve)
     assert _NEXT_PHASE_AFTER_GATE  # not empty

@@ -145,9 +145,8 @@ async def project_events(project_id: UUID, ws: WebSocket) -> None:
         await ws.close(code=4401, reason="expected auth message")
         return
 
-    from app.api.deps import _stable_uuid_from_uid
     from app.db.session import get_session
-    from app.models.db import ProjectRow
+    from app.models.db import ProjectRow, UserRow
     from app.services.auth import verify_firebase_token
 
     try:
@@ -182,11 +181,20 @@ async def project_events(project_id: UUID, ws: WebSocket) -> None:
         await ws.close(code=4401, reason="invalid token")
         return
 
-    user_id = _stable_uuid_from_uid(str(uid))
-
     async with get_session() as db:
+        # Resolve the internal user id by the natural key (firebase_uid),
+        # matching the HTTP auth path in deps.py. `users.id` is a DB surrogate,
+        # not derived from the UID, so a lookup — not a computation — is the
+        # only correct way to get it. A token for a user who has never hit an
+        # HTTP route (so has no users row yet) cannot own any project, so a
+        # missing row is an authorization failure, not an error.
+        from sqlalchemy import select
+
+        user_row = await db.scalar(select(UserRow).where(UserRow.firebase_uid == str(uid)))
+        user_id = user_row.id if user_row is not None else None
+
         project = await db.get(ProjectRow, project_id)
-        if project is None or project.owner_id != user_id:
+        if project is None or user_id is None or project.owner_id != user_id:
             _log.warning(
                 "ws.auth.unauthorized_project",
                 actor=str(user_id),

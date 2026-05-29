@@ -12,7 +12,6 @@ from __future__ import annotations
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime
 from typing import Annotated
-from uuid import UUID
 
 from fastapi import Depends, Header, HTTPException, status
 from sqlalchemy import select
@@ -76,56 +75,52 @@ async def get_current_user(
     uid: str = str(claims.get("uid", ""))
     email: str = str(claims.get("email", f"{uid}@unknown"))
     display_name: str | None = str(claims.get("name")) if claims.get("name") else None
-    user_id = _stable_uuid_from_uid(uid)
     now = datetime.now(tz=UTC)
 
-    # Upsert the users row so owner_id FK constraints resolve on real Postgres.
+    # Identity model (MED — identity-derivation portability): `users.id` is a
+    # DB-authoritative surrogate key (uuid4 generated on first insert), NOT a
+    # value derived from the Firebase UID. `firebase_uid` is the natural key we
+    # look up by. This decouples our internal identity from any external
+    # provider's id format and from a derivation algorithm — so the audit trail
+    # stays portable even if we change auth providers or namespaces later.
+    #
+    # Migration safety: existing rows created under the old UUIDv5 derivation
+    # keep their ids untouched (we match on firebase_uid, which is unchanged),
+    # so their projects/audit_log FKs remain valid. Only brand-new users get a
+    # fresh uuid4 from the column default.
     existing = await db.scalar(select(UserRow).where(UserRow.firebase_uid == uid))
     if existing is None:
-        db.add(
-            UserRow(
-                id=user_id,
-                firebase_uid=uid,
-                email=email,
-                display_name=display_name,
-                created_at=now,
-            )
+        row = UserRow(
+            firebase_uid=uid,
+            email=email,
+            display_name=display_name,
+            created_at=now,
         )
-        await db.flush()  # must be visible before any route inserts that FK-reference users.id
+        db.add(row)
+        # Flush so the DB-side uuid4 default materialises into row.id and is
+        # visible before any route inserts that FK-reference users.id.
+        await db.flush()
+        await db.refresh(row)
+        user_id = row.id
+        created_at = row.created_at
     else:
         existing.email = email
         existing.display_name = display_name
+        user_id = existing.id
+        created_at = existing.created_at
 
     return User(
         id=user_id,
         email=email,
         display_name=display_name,
-        created_at=now,
+        created_at=created_at,
     )
 
 
 CurrentUser = Annotated[User, Depends(get_current_user)]
 
-# Kept for backwards compat with any code that imported the old UUID sentinel.
-_STUB_USER_ID = UUID("00000000-0000-0000-0000-000000000001")
-
-# Frozen namespace UUID for deriving ResearchFlow user IDs from Firebase UIDs.
-# UUIDv5 within a stable namespace is the standard mechanism for "deterministic
-# UUID from a name" — far easier to reason about than the previous SHA-256
-# truncation, which was non-standard and made collision-space analysis fuzzy
-# (MED-2 reviewer finding). The namespace itself is a frozen v4 UUID; treating
-# it as the "researchflow.ai/users" domain keeps the mapping stable across
-# deployments while domain-separating from other UUIDv5 uses in the project.
-_RESEARCHFLOW_USER_NS = UUID("a3f12c14-7e51-4a89-9d3e-2b4f8c1c6e90")
-
-
-def _stable_uuid_from_uid(uid: str) -> UUID:
-    """Deterministic UUID from a Firebase UID string (no DB lookup needed).
-
-    Returns a UUIDv5 within the ResearchFlow user namespace. Collisions across
-    the ~2^122 effective space are vanishingly unlikely; uniqueness across
-    deployments is guaranteed by the frozen namespace UUID.
-    """
-    from uuid import uuid5
-
-    return uuid5(_RESEARCHFLOW_USER_NS, uid)
+# NOTE: the previous `_stable_uuid_from_uid` (UUIDv5-from-firebase-uid) was
+# removed. `users.id` is now a DB-authoritative surrogate key (uuid4 column
+# default) resolved by looking up `firebase_uid`. Identity is no longer
+# coupled to a derivation algorithm — this keeps the audit trail portable
+# across auth-provider or namespace changes (reviewer MED finding).

@@ -203,7 +203,7 @@ async def node_synthesize(state: GraphState) -> GraphState:
                 pool_size=len(approved_papers),
             )
         except Exception as exc:  # never fail synthesis because of Unpaywall
-            _log.warning("unpaywall_enrich_skipped", error=str(exc))
+            _log.warning("unpaywall_enrich_skipped", error_type=type(exc).__name__, error=str(exc))
 
         try:
             from app.services.fulltext_fetcher import get_fulltext_fetcher
@@ -216,7 +216,7 @@ async def node_synthesize(state: GraphState) -> GraphState:
                 pool_size=len(approved_papers),
             )
         except Exception as exc:  # never fail synthesis because of a PDF
-            _log.warning("fulltext_ingest_skipped", error=str(exc))
+            _log.warning("fulltext_ingest_skipped", error_type=type(exc).__name__, error=str(exc))
 
     critic = Critic()
     result = await critic.run(

@@ -64,7 +64,12 @@ class ChromaVectorStore:
         except VectorStoreUnavailableError:
             raise
         except Exception as exc:  # any backend error means the store is unavailable
-            _log.warning("vector_store_upsert_failed", namespace=namespace, error=str(exc))
+            _log.warning(
+                "vector_store_upsert_failed",
+                namespace=namespace,
+                error_type=type(exc).__name__,
+                error=str(exc),
+            )
             raise VectorStoreUnavailableError(str(exc)) from exc
 
     def _upsert_sync(self, namespace: str, documents: list[dict[str, object]]) -> None:
@@ -81,7 +86,12 @@ class ChromaVectorStore:
         except VectorStoreUnavailableError:
             raise
         except Exception as exc:  # any backend error means the store is unavailable
-            _log.warning("vector_store_query_failed", namespace=namespace, error=str(exc))
+            _log.warning(
+                "vector_store_query_failed",
+                namespace=namespace,
+                error_type=type(exc).__name__,
+                error=str(exc),
+            )
             raise VectorStoreUnavailableError(str(exc)) from exc
 
     def _query_sync(self, namespace: str, query: str, k: int) -> list[dict[str, object]]:

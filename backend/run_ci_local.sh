@@ -10,20 +10,46 @@ set -euo pipefail
 cd "$(dirname "$0")"
 ROOT="$(cd .. && pwd)"
 
-echo "==> preflight (required deps)"
-python scripts/preflight.py
+# --- Interpreter guard ---------------------------------------------------
+# The #1 cause of "27 collection errors" is running this against the system
+# Python where the deps were never installed. If a project .venv exists and
+# we are not already inside a venv, activate it so the whole pipeline uses
+# the SAME interpreter the deps were installed into. Fail loud if neither.
+if [[ -z "${VIRTUAL_ENV:-}" ]]; then
+    if [[ -f ".venv/Scripts/activate" ]]; then
+        # shellcheck disable=SC1091
+        source ".venv/Scripts/activate"   # Windows (Git Bash / MSYS)
+    elif [[ -f ".venv/bin/activate" ]]; then
+        # shellcheck disable=SC1091
+        source ".venv/bin/activate"        # POSIX
+    fi
+fi
+PY="python"
+
+# --- Writable cache dirs -------------------------------------------------
+# Avoids the ".pytest_cache access denied" / pycache permission noise the
+# reviewer flagged: pin every cache to a writable, gitignored scratch dir.
+export PYTHONPYCACHEPREFIX="${PYTHONPYCACHEPREFIX:-$PWD/.cache/pycache}"
+PYTEST_CACHE="$PWD/.cache/pytest"
+RUFF_CACHE="$PWD/.cache/ruff"
+MYPY_CACHE="$PWD/.cache/mypy"
+mkdir -p "$PYTHONPYCACHEPREFIX" "$PYTEST_CACHE" "$RUFF_CACHE" "$MYPY_CACHE"
+
+echo "==> preflight (interpreter + required deps + version drift)"
+"$PY" scripts/preflight.py
 
 echo "==> ruff check"
-ruff check .
+ruff check --cache-dir "$RUFF_CACHE" .
 
 echo "==> ruff format --check"
-ruff format --check .
+ruff format --check --cache-dir "$RUFF_CACHE" .
 
 echo "==> mypy"
-mypy app
+mypy --cache-dir "$MYPY_CACHE" app
 
 echo "==> pytest with coverage"
-pytest --cov=app --cov-report=term-missing --cov-report=annotate:cov_annotate -q
+"$PY" -m pytest -p no:cacheprovider -o cache_dir="$PYTEST_CACHE" \
+    --cov=app --cov-report=term-missing --cov-report=annotate:cov_annotate -q
 
 echo "==> forbidden-pattern grep (M4-A)"
 bash "$ROOT/scripts/check_forbidden_patterns.sh"

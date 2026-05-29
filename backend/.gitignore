@@ -1,0 +1,3 @@
+
+# CI scratch caches (pytest/ruff/mypy/pycache) — keep working tree clean
+.cache/

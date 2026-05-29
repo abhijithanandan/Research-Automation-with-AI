@@ -300,7 +300,7 @@ class Critic(Agent[CriticInput, CriticOutput]):
             await self._vs.upsert(namespace=str(project_id), documents=documents)
             return True
         except VectorStoreUnavailableError as exc:
-            _log.warning("critic_rag_unavailable", error=str(exc))
+            _log.warning("critic_rag_unavailable", error_type=type(exc).__name__, error=str(exc))
             return False
 
     async def _extract_batch(
@@ -340,7 +340,9 @@ class Critic(Agent[CriticInput, CriticOutput]):
                     snippets = " ".join(str(h.get("text", "")) for h in hits)
                     rag_block = f"Related context: {snippets}\n"
             except VectorStoreUnavailableError as exc:
-                _log.warning("critic_rag_query_failed", error=str(exc))
+                _log.warning(
+                    "critic_rag_query_failed", error_type=type(exc).__name__, error=str(exc)
+                )
 
         feedback_block = (
             f"Apply the following revision instruction: {feedback}\n\n" if feedback else ""
@@ -378,7 +380,9 @@ class Critic(Agent[CriticInput, CriticOutput]):
                 row.citation_key: row for row in envelope.extractions if row.citation_key
             }
         except Exception as exc:  # any failure → every paper gets an error row
-            _log.warning("critic_batch_extraction_failed", error=str(exc))
+            _log.warning(
+                "critic_batch_extraction_failed", error_type=type(exc).__name__, error=str(exc)
+            )
             return [
                 PaperExtraction(
                     citation_key=paper.citation_key,
@@ -438,7 +442,9 @@ class Critic(Agent[CriticInput, CriticOutput]):
                     snippets = " ".join(str(h.get("text", "")) for h in hits)
                     rag_block = f"Related context: {snippets}\n"
             except VectorStoreUnavailableError as exc:
-                _log.warning("critic_rag_query_failed", error=str(exc))
+                _log.warning(
+                    "critic_rag_query_failed", error_type=type(exc).__name__, error=str(exc)
+                )
 
         feedback_block = (
             f"Apply the following revision instruction: {feedback}\n\n" if feedback else ""
@@ -472,6 +478,7 @@ class Critic(Agent[CriticInput, CriticOutput]):
             _log.warning(
                 "critic_extraction_failed",
                 citation_key=paper.citation_key,
+                error_type=type(exc).__name__,
                 error=str(exc),
             )
             return PaperExtraction(
@@ -503,7 +510,7 @@ class Critic(Agent[CriticInput, CriticOutput]):
             self._accumulate(usage, telemetry)
             return text or "## Synthesis\n\n(No narrative produced.)"
         except Exception as exc:  # degrade gracefully on synthesis failure
-            _log.warning("critic_synthesis_failed", error=str(exc))
+            _log.warning("critic_synthesis_failed", error_type=type(exc).__name__, error=str(exc))
             return f"## Synthesis\n\nNarrative generation failed: {exc}"
 
     @staticmethod

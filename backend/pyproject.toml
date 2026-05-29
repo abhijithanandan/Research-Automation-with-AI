@@ -10,7 +10,17 @@ authors = [{ name = "Abhijith Anandakrishnan" }]
 dependencies = [
     "fastapi>=0.110",
     "uvicorn[standard]>=0.27",
-    "pydantic>=2.5",
+    # --- Compatibility-pinned trio (+ langchain-core, the actual symbol source).
+    # A reviewer hit an ImportError where langchain/langgraph pulled a pydantic
+    # symbol a mismatched pydantic version no longer exported. These bounded
+    # ranges keep the three in a verified-compatible window (known-good set:
+    # pydantic 2.13.4 / langchain-core 1.4.0 / langgraph 1.2.1) so a loose
+    # `>=` can't silently resolve to an incompatible combination. The preflight
+    # asserts these floors too (scripts/preflight.py::_COMPAT_TRIO).
+    "pydantic>=2.11,<3",
+    "langchain-core>=1.0,<2",
+    "langgraph>=1.0,<2",
+    "langchain>=1.0,<2",
     "pydantic-settings>=2.1",
     "httpx>=0.27",
     "sqlalchemy[asyncio]>=2.0",
@@ -19,9 +29,7 @@ dependencies = [
     "psycopg-binary>=3.1",
     "psycopg-pool>=3.2",
     "alembic>=1.13",
-    "langgraph>=0.2",
     "langgraph-checkpoint-postgres>=0.1",
-    "langchain>=0.2",
     "structlog>=24.1",
     "python-multipart>=0.0.9",
     "firebase-admin>=6.4",

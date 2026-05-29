@@ -140,6 +140,7 @@ class DiscoveryService:
                     "discovery_query_error",
                     source=type(adapter).__name__,
                     query=query,
+                    error_type=type(exc).__name__,
                     error=str(exc),
                 )
                 # Treat the failure the same as an empty result so a source

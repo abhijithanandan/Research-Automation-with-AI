@@ -121,9 +121,13 @@ class UnpaywallEnricher:
                         doi=doi,
                     )
                 except Exception as exc:
+                    # Best-effort enrichment: one paper's lookup must never sink
+                    # the pool. Broad by design; error_type keeps the defect
+                    # class queryable.
                     _log.warning(
                         "unpaywall_per_paper_error",
                         citation_key=paper.citation_key,
+                        error_type=type(exc).__name__,
                         error=str(exc),
                     )
                     enriched.append(paper)
