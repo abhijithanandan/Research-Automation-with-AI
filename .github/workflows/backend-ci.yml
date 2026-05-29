@@ -25,10 +25,17 @@ jobs:
           python-version: "3.11"
           cache: pip
 
-      - name: Install dependencies
+      - name: Install dependencies (reproducible — locked set)
         run: |
           python -m pip install --upgrade pip
-          pip install -e ".[dev]"
+          # ONE reproducible install path: the fully-pinned lock is the exact
+          # transitive closure the suite is verified against, so CI can't drift.
+          # Then install THIS package editable without re-resolving deps.
+          pip install -r requirements-lock.txt
+          pip install -e ".[dev]" --no-deps
+
+      - name: Preflight (interpreter + deps + version drift)
+        run: python scripts/preflight.py
 
       - name: Ruff lint
         run: ruff check .

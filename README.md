@@ -151,11 +151,21 @@ If you prefer running services on the host:
 **Backend**
 ```bash
 cd backend
-python -m venv .venv && source .venv/bin/activate
-pip install -e ".[dev]"
+python -m venv .venv && source .venv/bin/activate   # Windows: .venv/Scripts/activate
+# Reproducible install — the locked set CI is verified against. This is the
+# ONE supported install path; it avoids the dependency/version drift that
+# otherwise breaks pytest at *collection* time (langchain-core ↔ pydantic).
+pip install -r requirements-lock.txt
+pip install -e ".[dev]" --no-deps
+python scripts/preflight.py   # verifies interpreter + deps + version alignment
 cp .env.example .env  # fill in keys
 uvicorn app.main:app --reload --port 8000
 ```
+
+> If `pytest` fails at collection with `ModuleNotFoundError` for `pytest_asyncio`,
+> `respx`, `pydantic_settings`, etc., you are almost certainly running the
+> **system Python** instead of `.venv`. Run `python scripts/preflight.py` — it
+> names the exact problem and the fix. `./run_ci_local.sh` auto-activates `.venv`.
 
 **Frontend**
 ```bash

@@ -10,14 +10,11 @@ In dev (DEV_AUTH_BYPASS=true) the raw token string is used as firebase_uid.
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
-from datetime import UTC, datetime
 from typing import Annotated
 
 from fastapi import Depends, Header, HTTPException, status
-from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models.db import UserRow
 from app.models.schemas import User
 from app.services.auth import verify_firebase_token
 
@@ -75,45 +72,20 @@ async def get_current_user(
     uid: str = str(claims.get("uid", ""))
     email: str = str(claims.get("email", f"{uid}@unknown"))
     display_name: str | None = str(claims.get("name")) if claims.get("name") else None
-    now = datetime.now(tz=UTC)
 
-    # Identity model (MED — identity-derivation portability): `users.id` is a
-    # DB-authoritative surrogate key (uuid4 generated on first insert), NOT a
-    # value derived from the Firebase UID. `firebase_uid` is the natural key we
-    # look up by. This decouples our internal identity from any external
-    # provider's id format and from a derivation algorithm — so the audit trail
-    # stays portable even if we change auth providers or namespaces later.
-    #
-    # Migration safety: existing rows created under the old UUIDv5 derivation
-    # keep their ids untouched (we match on firebase_uid, which is unchanged),
-    # so their projects/audit_log FKs remain valid. Only brand-new users get a
-    # fresh uuid4 from the column default.
-    existing = await db.scalar(select(UserRow).where(UserRow.firebase_uid == uid))
-    if existing is None:
-        row = UserRow(
-            firebase_uid=uid,
-            email=email,
-            display_name=display_name,
-            created_at=now,
-        )
-        db.add(row)
-        # Flush so the DB-side uuid4 default materialises into row.id and is
-        # visible before any route inserts that FK-reference users.id.
-        await db.flush()
-        await db.refresh(row)
-        user_id = row.id
-        created_at = row.created_at
-    else:
-        existing.email = email
-        existing.display_name = display_name
-        user_id = existing.id
-        created_at = existing.created_at
+    # Identity resolution goes through the ONE shared rule in services.auth so
+    # the HTTP and WebSocket transports can never drift (see the contract docs
+    # on resolve_or_create_user). `users.id` is a DB surrogate, looked up by
+    # firebase_uid — not derived from it.
+    from app.services.auth import resolve_or_create_user
+
+    row = await resolve_or_create_user(db, firebase_uid=uid, email=email, display_name=display_name)
 
     return User(
-        id=user_id,
-        email=email,
-        display_name=display_name,
-        created_at=created_at,
+        id=row.id,
+        email=row.email,
+        display_name=row.display_name,
+        created_at=row.created_at,
     )
 
 
