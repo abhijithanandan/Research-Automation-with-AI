@@ -368,12 +368,30 @@ export default function HomePage() {
     }
   }
 
-  async function handleApprove() {
+  async function handleApprove(opts?: {
+    force_unresolved?: boolean;
+    override_reason?: string | null;
+  }) {
     if (!ctx) return;
     setView("busy");
     try {
-      await api.workflow.approve(ctx.projectId, null, DEV_TOKEN);
+      await api.workflow.approve(
+        ctx.projectId,
+        {
+          feedback: null,
+          ...(opts?.force_unresolved ? { force_unresolved: true } : {}),
+          ...(opts?.override_reason ? { override_reason: opts.override_reason } : {}),
+        },
+        DEV_TOKEN,
+      );
     } catch (err) {
+      // Re-throw the typed ApiError so the SectionReview can branch on a 409
+      // unresolved_citations response (FR-1.5) without flipping to the error
+      // view. Other callers still let it fall through to setError.
+      if (err instanceof ApiError && err.code === "unresolved_citations") {
+        setView("drafting");
+        throw err;
+      }
       setError(describeError(err, "Approve failed."));
       setView("error");
     }
@@ -586,6 +604,7 @@ export default function HomePage() {
               <SectionReview
                 section={sectionArtifact}
                 currentSection={currentSection}
+                projectId={ctx?.projectId ?? ""}
                 loading={sectionLoading}
                 busy={false}
                 onApprove={handleApprove}

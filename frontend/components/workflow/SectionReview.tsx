@@ -1,11 +1,15 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 
 import { diffLines, diffStats, type DiffOp } from "@/components/workflow/diffLines";
 import { Markdown } from "@/components/workflow/Markdown";
-import type { Artifact, SectionName } from "@/lib/types";
+import { ApiError, api } from "@/lib/api";
+import type { Artifact, CitationPanel, SectionName } from "@/lib/types";
 import { cn } from "@/lib/utils";
+
+// Dev token — matches the pattern used in page.tsx for the rest of the app.
+const DEV_TOKEN = process.env.NEXT_PUBLIC_DEV_TOKEN ?? "dev-token";
 
 // ---------------------------------------------------------------------------
 // Canonical seven-section order — mirrors backend SectionName.
@@ -41,17 +45,25 @@ export interface SectionOverridePayload {
   label: string;
   content: string;
   mime_type: string;
+  /** FR-1.5: map of `{bad_key: good_key}` applied to `content` before save. */
+  citation_corrections?: Record<string, string>;
+  /** Free-text rationale for the manual edit (audited as user.citation_correction). */
+  override_reason?: string | null;
 }
 
 interface SectionReviewProps {
   section: Artifact | null;
   /** Current section name from the WS `approval.required` event. */
   currentSection: SectionName | null;
-  /** Citation keys returned by the Scribe; offenders carry an `INVALID:` prefix. */
-  citedKeys?: string[];
+  /** Project id — needed to fetch citations from /drafting/citations. */
+  projectId: string;
   loading: boolean;
   busy: boolean;
-  onApprove: () => void;
+  /** Approve may be called with `{force_unresolved, override_reason}` (FR-1.5). */
+  onApprove: (opts?: {
+    force_unresolved?: boolean;
+    override_reason?: string | null;
+  }) => Promise<void>;
   onReject: (feedback: string) => void;
   onOverride: (payload: SectionOverridePayload) => void;
 }
@@ -67,7 +79,7 @@ type EditView = "edit" | "diff" | "preview";
 export function SectionReview({
   section,
   currentSection,
-  citedKeys,
+  projectId,
   loading,
   busy,
   onApprove,
@@ -79,6 +91,15 @@ export function SectionReview({
   const [feedback, setFeedback] = useState("");
   const [editContent, setEditContent] = useState("");
   const [editView, setEditView] = useState<EditView>("edit");
+  // Citation Manager v1 (FR-1.5) — source of truth from /drafting/citations.
+  const [citations, setCitations] = useState<CitationPanel | null>(null);
+  // Force-approve flow: when the backend returns 409 unresolved_citations.
+  const [forceState, setForceState] = useState<
+    { keys: string[]; reason: string } | null
+  >(null);
+  // Override-mode citation corrections: bad_key → approved_key.
+  const [corrections, setCorrections] = useState<Record<string, string>>({});
+  const [overrideReason, setOverrideReason] = useState("");
 
   const sectionName = currentSection ?? (section?.label as SectionName | undefined) ?? null;
   const progress = useMemo(() => {
@@ -97,21 +118,45 @@ export function SectionReview({
   );
   const stats = useMemo(() => diffStats(diffOps), [diffOps]);
 
-  // Citation chips: keys starting with `INVALID:` are the second-failure
-  // offenders flagged by the Scribe (see backend agents/scribe.py).
-  const { validCitations, invalidCitations } = useMemo(() => {
-    const valid: string[] = [];
-    const invalid: string[] = [];
-    for (const k of citedKeys ?? []) {
-      if (k.startsWith("INVALID:")) invalid.push(k.slice("INVALID:".length));
-      else valid.push(k);
+  // ── Fetch citations whenever the section artifact changes ─────────────
+  // section.id changes on reject→redraft, so this re-runs and reflects the
+  // new draft. Section name alone is not enough (it stays the same on retry).
+  useEffect(() => {
+    if (!section || !sectionName || !projectId) {
+      setCitations(null);
+      return;
     }
-    return { validCitations: valid, invalidCitations: invalid };
-  }, [citedKeys]);
+    let cancelled = false;
+    api.drafting
+      .citations(projectId, sectionName, DEV_TOKEN)
+      .then((panel) => {
+        if (!cancelled) setCitations(panel);
+      })
+      .catch(() => {
+        // Non-blocking — the rest of the panel still works. The endpoint
+        // returns 404 only if the project doesn't exist, which is a hard
+        // error already surfaced elsewhere; for any other failure we just
+        // fall back to "no citations detected" UX.
+        if (!cancelled) setCitations(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [section, sectionName, projectId]);
+
+  const resolvedCitations = citations?.resolved ?? [];
+  const unresolvedKeys = citations?.unresolved_keys ?? [];
+  const citationCount = (citations?.cited_keys.length ?? 0);
 
   function startEditing() {
     setEditContent(sectionContent);
     setEditView("edit");
+    // Pre-seed the corrections map with each unresolved key → "" so the
+    // override panel surfaces the fix UI immediately.
+    const seed: Record<string, string> = {};
+    for (const k of unresolvedKeys) seed[k] = "";
+    setCorrections(seed);
+    setOverrideReason("");
     setAction("override");
   }
 
@@ -122,12 +167,49 @@ export function SectionReview({
 
   function handleOverrideSubmit() {
     if (!editContent.trim()) return;
+    // Only forward corrections that have a non-empty replacement key — empty
+    // ones mean the reviewer left them as unresolved (will block approve
+    // unless force_unresolved is used afterward).
+    const applied: Record<string, string> = {};
+    for (const [bad, good] of Object.entries(corrections)) {
+      if (good.trim()) applied[bad] = good.trim();
+    }
     onOverride({
       artifact_kind: "section",
       label: section?.label ?? sectionName ?? "section",
       content: editContent.trim(),
       mime_type: "text/markdown",
+      ...(Object.keys(applied).length > 0 ? { citation_corrections: applied } : {}),
+      ...(overrideReason.trim() ? { override_reason: overrideReason.trim() } : {}),
     });
+  }
+
+  async function handleApprovePlain() {
+    try {
+      await onApprove();
+    } catch (err) {
+      // Backend 409 unresolved_citations — surface the keys and let the
+      // reviewer either fix them via override or force-approve with a reason.
+      if (err instanceof ApiError && err.code === "unresolved_citations") {
+        const detail = (err.detail as { detail?: { keys?: string[] } } | undefined)?.detail;
+        const keys = detail?.keys ?? unresolvedKeys;
+        setForceState({ keys, reason: "" });
+      }
+    }
+  }
+
+  async function handleForceApproveSubmit() {
+    if (!forceState) return;
+    if (!forceState.reason.trim()) return;
+    try {
+      await onApprove({
+        force_unresolved: true,
+        override_reason: forceState.reason.trim(),
+      });
+      setForceState(null);
+    } catch {
+      // onApprove already routed errors to the error view; keep the dialog open.
+    }
   }
 
   // ── Loading — manuscript-shaped skeleton, not a spinner ───────────────
@@ -203,8 +285,8 @@ export function SectionReview({
           )}
         </div>
 
-        {/* Invalid-citation warning banner (Scribe surfaced offenders after retry) */}
-        {invalidCitations.length > 0 && (
+        {/* Unresolved-citation warning banner (keys cited but NOT in the approved pool) */}
+        {unresolvedKeys.length > 0 && (
           <div className="mb-4 border-l-2 border-warning py-3 pl-4">
             <div className="flex items-start gap-2.5">
               <svg
@@ -217,15 +299,16 @@ export function SectionReview({
               </svg>
               <div className="space-y-0.5">
                 <p className="text-xs font-semibold text-warning">
-                  {invalidCitations.length} citation{invalidCitations.length !== 1 ? "s" : ""} not in
-                  the approved pool
+                  {unresolvedKeys.length} unresolved citation
+                  {unresolvedKeys.length !== 1 ? "s" : ""} — approve is blocked
                 </p>
                 <p className="text-xs text-muted">
-                  The Scribe retried once and still cited{" "}
+                  The draft cites{" "}
                   <code className="rounded bg-surface-elevated px-1 py-0.5 font-mono text-warning">
-                    {invalidCitations.join(", ")}
-                  </code>
-                  . Review the citations tab; you can reject to regenerate or edit to fix the keys.
+                    {unresolvedKeys.join(", ")}
+                  </code>{" "}
+                  but these keys are not in the approved pool. Edit &amp; override to map them
+                  to valid keys, reject to regenerate, or force-approve with a written reason.
                 </p>
               </div>
             </div>
@@ -241,7 +324,7 @@ export function SectionReview({
             Source
           </TabButton>
           <TabButton active={tab === "citations"} onClick={() => setTab("citations")}>
-            Citations ({(validCitations.length + invalidCitations.length).toString()})
+            Citations ({citationCount.toString()})
           </TabButton>
         </div>
 
@@ -260,44 +343,77 @@ export function SectionReview({
           )}
 
           {tab === "citations" && (
-            <div className="space-y-3">
-              {validCitations.length === 0 && invalidCitations.length === 0 && (
+            <div className="space-y-5">
+              {citationCount === 0 && (
                 <p className="text-xs text-muted">
                   No citations were detected in this section.
                 </p>
               )}
-              {validCitations.length > 0 && (
-                <div className="space-y-1.5">
+              {resolvedCitations.length > 0 && (
+                <div className="space-y-2">
                   <p className="text-[11px] font-semibold uppercase tracking-wider text-muted">
-                    In the approved pool ({validCitations.length})
+                    From the approved pool ({resolvedCitations.length})
                   </p>
-                  <div className="flex flex-wrap gap-1.5">
-                    {validCitations.map((k) => (
-                      <code
-                        key={k}
-                        className="rounded-full border border-primary/30 bg-primary/10 px-2.5 py-0.5 font-mono text-[11px] text-primary"
+                  <div className="space-y-2">
+                    {resolvedCitations.map((c) => (
+                      <article
+                        key={c.citation_key}
+                        className="rounded-md border border-border bg-surface-elevated/40 p-3"
                       >
-                        {k}
-                      </code>
+                        <div className="flex items-baseline justify-between gap-3">
+                          <code className="font-mono text-[11px] text-primary">
+                            [@{c.citation_key}]
+                          </code>
+                          {c.year !== null && (
+                            <span className="font-mono text-[11px] text-muted">{c.year}</span>
+                          )}
+                        </div>
+                        <p className="mt-1 text-sm font-medium text-foreground">{c.title}</p>
+                        {c.authors.length > 0 && (
+                          <p className="mt-0.5 text-xs text-muted">
+                            {c.authors.slice(0, 6).join(", ")}
+                            {c.authors.length > 6 ? ", et al." : ""}
+                          </p>
+                        )}
+                        <div className="mt-2 flex items-center gap-3 text-[11px]">
+                          <span className="rounded bg-surface-elevated px-1.5 py-0.5 font-mono uppercase tracking-wider text-muted-foreground">
+                            {c.source}
+                          </span>
+                          {c.url && (
+                            <a
+                              href={c.url}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="text-primary hover:underline"
+                            >
+                              View source →
+                            </a>
+                          )}
+                        </div>
+                      </article>
                     ))}
                   </div>
                 </div>
               )}
-              {invalidCitations.length > 0 && (
-                <div className="space-y-1.5">
+              {unresolvedKeys.length > 0 && (
+                <div className="space-y-2">
                   <p className="text-[11px] font-semibold uppercase tracking-wider text-warning">
-                    Not in pool — flagged by Scribe ({invalidCitations.length})
+                    Unresolved ({unresolvedKeys.length}) — not in the approved pool
                   </p>
                   <div className="flex flex-wrap gap-1.5">
-                    {invalidCitations.map((k) => (
+                    {unresolvedKeys.map((k) => (
                       <code
                         key={k}
                         className="rounded-full border border-warning/40 bg-warning/10 px-2.5 py-0.5 font-mono text-[11px] text-warning"
                       >
-                        {k}
+                        [@{k}]
                       </code>
                     ))}
                   </div>
+                  <p className="text-[11px] text-muted-foreground">
+                    Edit &amp; override to remap each to a valid pool key, or force-approve
+                    with a written reason.
+                  </p>
                 </div>
               )}
             </div>
@@ -315,7 +431,55 @@ export function SectionReview({
         </div>
 
         <div className="space-y-4">
-          {action === "idle" && (
+          {forceState && (
+            <div className="space-y-3 rounded-md border border-warning/40 bg-warning/5 p-4 animate-fade-in">
+              <div className="space-y-1">
+                <p className="text-xs font-semibold uppercase tracking-wider text-warning">
+                  Approve is blocked — unresolved citations
+                </p>
+                <p className="text-xs text-muted">
+                  The draft cites{" "}
+                  <code className="rounded bg-surface-elevated px-1 py-0.5 font-mono text-warning">
+                    {forceState.keys.map((k) => `[@${k}]`).join(", ")}
+                  </code>
+                  . Approving anyway is recorded as an audited override.
+                </p>
+              </div>
+              <label className="block text-xs font-medium uppercase tracking-wider text-muted">
+                Reason (required for force approve)
+              </label>
+              <textarea
+                className="w-full rounded-lg border border-border bg-surface-elevated p-3 text-sm text-foreground placeholder-muted-foreground/50 focus:border-warning/60 focus:outline-none focus:ring-1 focus:ring-warning/30"
+                rows={2}
+                placeholder="e.g. intentional placeholders; will fix in revision pass…"
+                value={forceState.reason}
+                onChange={(e) =>
+                  setForceState((s) => (s ? { ...s, reason: e.target.value } : s))
+                }
+                autoFocus
+              />
+              <div className="flex gap-2">
+                <button
+                  type="button"
+                  onClick={() => void handleForceApproveSubmit()}
+                  disabled={busy || !forceState.reason.trim()}
+                  className="rounded-lg border border-warning/40 bg-warning/10 px-4 py-2 text-sm font-medium text-warning transition-all hover:bg-warning/15 disabled:cursor-not-allowed disabled:opacity-40"
+                >
+                  {busy ? "Working…" : "Force approve (audited)"}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setForceState(null)}
+                  disabled={busy}
+                  className="rounded-lg border border-border px-4 py-2 text-sm font-medium text-muted transition-all hover:bg-surface-elevated disabled:opacity-40"
+                >
+                  Cancel
+                </button>
+              </div>
+            </div>
+          )}
+
+          {action === "idle" && !forceState && (
             <>
               <p className="text-sm text-muted">
                 Approve to advance to the next section, reject with feedback to regenerate,
@@ -324,7 +488,7 @@ export function SectionReview({
               <div className="flex flex-wrap gap-3">
                 <button
                   type="button"
-                  onClick={onApprove}
+                  onClick={() => void handleApprovePlain()}
                   disabled={busy}
                   className="flex items-center gap-2 rounded-md bg-primary px-5 py-2.5 text-sm font-semibold text-primary-foreground transition-all duration-200 hover:bg-primary-hover hover:shadow-[0_0_20px_oklch(72%_0.20_155_/_0.35)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/60 active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-40"
                 >
@@ -426,6 +590,51 @@ export function SectionReview({
                 </code>{" "}
                 in the audit log. Approval is implied — the workflow advances to the next section.
               </p>
+
+              {Object.keys(corrections).length > 0 && (
+                <div className="space-y-2 rounded-md border border-warning/30 bg-warning/5 p-3">
+                  <p className="text-[11px] font-semibold uppercase tracking-wider text-warning">
+                    Fix unresolved citation keys
+                  </p>
+                  <p className="text-[11px] text-muted">
+                    For each bad key, type a valid approved-pool key. Each fix rewrites the
+                    matching <code className="font-mono">[@bad]</code> marker in your edit and
+                    is recorded as <code className="font-mono">user.citation_correction</code>.
+                  </p>
+                  <div className="space-y-1.5">
+                    {Object.entries(corrections).map(([bad, good]) => (
+                      <div key={bad} className="flex items-center gap-2">
+                        <code className="w-40 shrink-0 rounded bg-surface-elevated px-2 py-1 font-mono text-[11px] text-warning">
+                          [@{bad}]
+                        </code>
+                        <span className="text-[11px] text-muted-foreground">→</span>
+                        <input
+                          type="text"
+                          value={good}
+                          onChange={(e) =>
+                            setCorrections((c) => ({ ...c, [bad]: e.target.value }))
+                          }
+                          placeholder="approved citation key (e.g. lecun2015)"
+                          className="flex-1 rounded border border-border bg-surface-elevated px-2 py-1 font-mono text-[11px] text-foreground placeholder-muted-foreground/50 focus:border-primary/60 focus:outline-none focus:ring-1 focus:ring-primary/30"
+                        />
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              <div className="space-y-1">
+                <label className="block text-[11px] font-medium uppercase tracking-wider text-muted">
+                  Override reason (optional, audited)
+                </label>
+                <input
+                  type="text"
+                  value={overrideReason}
+                  onChange={(e) => setOverrideReason(e.target.value)}
+                  placeholder="e.g. fixed hallucinated keys; tightened claim"
+                  className="w-full rounded border border-border bg-surface-elevated px-2 py-1.5 text-xs text-foreground placeholder-muted-foreground/50 focus:border-primary/60 focus:outline-none focus:ring-1 focus:ring-primary/30"
+                />
+              </div>
 
               <div className="flex items-center justify-between gap-2 border-b border-border/60 pb-2">
                 <div className="flex gap-1">

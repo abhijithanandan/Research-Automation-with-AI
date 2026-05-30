@@ -1,7 +1,7 @@
 // Typed REST client. Mirrors SPEC.md §3.
 // Every API call must go through this file — do not call `fetch` from components.
 
-import type { Artifact, Paper, Project } from "./types";
+import type { Artifact, CitationPanel, Paper, Project } from "./types";
 
 const BASE_URL =
   process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8000";
@@ -155,10 +155,18 @@ export const api = {
         token,
       }),
 
-    approve: (projectId: string, feedback: string | null, token: string) =>
+    approve: (
+      projectId: string,
+      body: {
+        feedback?: string | null;
+        force_unresolved?: boolean;
+        override_reason?: string | null;
+      },
+      token: string,
+    ) =>
       request<unknown>(`/projects/${projectId}/workflow/approve`, {
         method: "POST",
-        body: JSON.stringify({ feedback }),
+        body: JSON.stringify(body),
         token,
       }),
 
@@ -176,6 +184,8 @@ export const api = {
         label: string;
         content: string;
         mime_type?: string;
+        citation_corrections?: Record<string, string>;
+        override_reason?: string | null;
       },
       token: string,
     ) =>
@@ -184,6 +194,14 @@ export const api = {
         body: JSON.stringify(body),
         token,
       }),
+  },
+
+  drafting: {
+    citations: (projectId: string, section: string, token: string) =>
+      request<CitationPanel>(
+        `/projects/${projectId}/drafting/citations?section=${encodeURIComponent(section)}`,
+        { token },
+      ),
   },
 
   papers: {

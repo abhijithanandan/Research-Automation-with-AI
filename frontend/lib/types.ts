@@ -109,3 +109,21 @@ export interface ApiError {
     trace_id?: string;
   };
 }
+
+/** One paper resolved against the approved pool (citation manager v1, FR-1.5). */
+export interface ResolvedCitation {
+  citation_key: string;
+  title: string;
+  authors: string[];
+  year: number | null;
+  source: string;
+  url: string | null;
+}
+
+/** Response shape from GET /projects/{id}/drafting/citations?section=. */
+export interface CitationPanel {
+  section: string;
+  cited_keys: string[];
+  unresolved_keys: string[];
+  resolved: ResolvedCitation[];
+}
