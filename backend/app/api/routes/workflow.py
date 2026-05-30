@@ -6,7 +6,7 @@ from typing import Literal
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, status
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from app.api.deps import CurrentUser, DbSession
 from app.api.rate_limit import rate_limit
@@ -47,8 +47,19 @@ class ApprovePayload(BaseModel):
     feedback: str | None = Field(default=None, max_length=_MAX_FEEDBACK_CHARS)
     # Approve despite unresolved citation keys (default: block). Additive.
     force_unresolved: bool = False
-    # Required-in-spirit when force_unresolved is set: why the bypass is OK.
+    # When force_unresolved is True this MUST be non-empty (W2-S1) — the
+    # frontend already disables the button on empty input, but the server
+    # also enforces so a curl call can't bypass it and leave the audit log
+    # with empty-reason forced approvals.
     override_reason: str | None = Field(default=None, max_length=_MAX_FEEDBACK_CHARS)
+
+    @model_validator(mode="after")
+    def _require_reason_on_force(self) -> "ApprovePayload":
+        if self.force_unresolved and not (self.override_reason or "").strip():
+            raise ValueError(
+                "override_reason is required (non-empty) when force_unresolved=true"
+            )
+        return self
 
 
 class OverridePayload(BaseModel):

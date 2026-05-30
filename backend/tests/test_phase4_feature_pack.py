@@ -383,3 +383,49 @@ async def test_drafting_telemetry_scopes_to_project(db_session: AsyncSession) ->
 
     t = await drafting_telemetry(db_session, TEST_PROJECT_ID)
     assert t["overrides"] == 1  # only this project's row
+
+
+# ===========================================================================
+# W2-S1 — server-enforced override_reason when force_unresolved=true
+# ===========================================================================
+
+
+def test_approve_payload_rejects_force_without_reason() -> None:
+    """W2-S1: force_unresolved=true requires a non-empty override_reason at
+    the schema level. A curl-style bypass of the frontend disable cannot
+    leave the audit log with an empty-reason forced approval."""
+    import pytest as _pytest
+    from pydantic import ValidationError
+
+    from app.api.routes.workflow import ApprovePayload
+
+    # Missing reason entirely → ValidationError.
+    with _pytest.raises(ValidationError, match="override_reason is required"):
+        ApprovePayload(force_unresolved=True)
+
+    # Whitespace-only reason → ValidationError (strip then check non-empty).
+    with _pytest.raises(ValidationError, match="override_reason is required"):
+        ApprovePayload(force_unresolved=True, override_reason="   \n\t  ")
+
+    # Empty string → ValidationError.
+    with _pytest.raises(ValidationError, match="override_reason is required"):
+        ApprovePayload(force_unresolved=True, override_reason="")
+
+
+def test_approve_payload_accepts_force_with_reason() -> None:
+    """Happy path: real reason text passes validation."""
+    from app.api.routes.workflow import ApprovePayload
+
+    p = ApprovePayload(force_unresolved=True, override_reason="intentional placeholder")
+    assert p.force_unresolved is True
+    assert p.override_reason == "intentional placeholder"
+
+
+def test_approve_payload_no_force_no_reason_required() -> None:
+    """Regression guard: when force_unresolved=False (default), an empty
+    override_reason is fine — the new validator only kicks in on force."""
+    from app.api.routes.workflow import ApprovePayload
+
+    p = ApprovePayload()
+    assert p.force_unresolved is False
+    assert p.override_reason is None
