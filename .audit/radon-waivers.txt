@@ -1,0 +1,21 @@
+# Radon complexity-budget waivers — audit/2026-05-31
+#
+# Format: one function name per line. Lines starting with # are comments.
+# The radon-budget script greps these against rank-D-or-worse offenders.
+#
+# Adding a new entry requires a 1-line justification in
+# reports/findings-matrix.md AND a closure-report mention in the
+# next hardening-closure.md cycle.
+
+# Discovery adapters — heterogeneous external-API response shapes; the
+# complexity is the API surface area, not application logic. Each is a
+# rank-D method on the corresponding adapter class.
+EuropePMCAdapter._search_with_retry
+ArXivAdapter._search_with_retry
+CrossrefAdapter._search_with_retry
+CoreAdapter._search_with_retry
+
+# Reference formatter — flat conditional cascade over many paper-metadata
+# field permutations (DOI / arXiv id / SS id / Europe PMC id / pdf_url
+# fallback). Splitting into helpers makes it less readable, not more.
+_format_reference_entry
