@@ -22,6 +22,7 @@ from uuid import UUID, uuid4
 
 from pydantic import BaseModel
 
+from app.agents._prompt_safety import SYSTEM_ANCHOR, safe_tag, xml_escape
 from app.agents.base import Agent
 from app.models.schemas import Artifact, Paper
 from app.services.llm import LLMGateway, get_llm_gateway
@@ -39,12 +40,10 @@ You are a research critic. Read the paper below and extract exactly five
 attributes. Be concise — one or two sentences each.
 
 {feedback_block}Paper citation_key: {citation_key}
-Title: {title}
-Abstract: {abstract}
+{paper_block}
 {rag_block}
 Return JSON with keys: citation_key, problem, method, dataset,
-key_findings, limitations.
-"""
+key_findings, limitations.{system_anchor}"""
 
 # Batched extraction template — one LLM call returns a JSON array containing
 # all per-paper extractions. Lets the Critic stay inside the Gemini free-tier
@@ -76,8 +75,7 @@ Return JSON in this exact shape:
 
 The "extractions" array MUST contain exactly {paper_count} entries — one for
 every paper above, identified by its citation_key. Do not skip papers, do
-not invent new citation_keys.
-"""
+not invent new citation_keys.{system_anchor}"""
 
 _SYNTHESIS_PROMPT_TEMPLATE = """\
 You are a research critic writing a literature synthesis (a narrative
@@ -337,25 +335,39 @@ class Critic(Agent[CriticInput, CriticOutput]):
             try:
                 hits = await self._vs.query(namespace=str(project_id), query=papers[0].title, k=3)
                 if hits:
+                    # W1-A1: RAG snippets are chunked from the same poisoned-
+                    # paper-text source the abstract came from — wrap in <rag>
+                    # so a crafted PDF body can't issue instructions either.
                     snippets = " ".join(str(h.get("text", "")) for h in hits)
-                    rag_block = f"Related context: {snippets}\n"
+                    rag_block = f"Related context: {safe_tag('rag', snippets)}\n"
             except VectorStoreUnavailableError as exc:
                 _log.warning(
                     "critic_rag_query_failed", error_type=type(exc).__name__, error=str(exc)
                 )
 
+        # W1-A1: wrap untrusted reviewer feedback so it can't override the
+        # system instructions above.
         feedback_block = (
-            f"Apply the following revision instruction: {feedback}\n\n" if feedback else ""
+            f"Apply the following revision instruction: {safe_tag('reviewer_feedback', feedback)}\n\n"
+            if feedback
+            else ""
         )
-        # Render the papers block — one entry per paper with citation_key,
-        # title, abstract. Keeps order so the model's response ordering
-        # matches our internal list when we re-merge.
+        # Render the papers block — one <paper id="key"> tag per paper, with
+        # title/abstract as escaped child tags. Keeps order so the model's
+        # response ordering matches our internal list when we re-merge.
         papers_block_lines: list[str] = []
         for paper in papers:
             papers_block_lines.append(
-                f"---\ncitation_key: {paper.citation_key}\n"
-                f"title: {paper.title}\n"
-                f"abstract: {paper.abstract or '(no abstract available)'}\n"
+                "---\n"
+                f"citation_key: {xml_escape(paper.citation_key)}\n"
+                + safe_tag(
+                    "paper",
+                    safe_tag("title", paper.title)
+                    + safe_tag("abstract", paper.abstract or "(no abstract available)"),
+                    attrs={"id": paper.citation_key},
+                    raw=True,
+                )
+                + "\n"
             )
         papers_block = "".join(papers_block_lines)
 
@@ -364,6 +376,7 @@ class Critic(Agent[CriticInput, CriticOutput]):
             feedback_block=feedback_block,
             papers_block=papers_block,
             rag_block=rag_block,
+            system_anchor=SYSTEM_ANCHOR,
         )
 
         try:
@@ -439,22 +452,35 @@ class Critic(Agent[CriticInput, CriticOutput]):
             try:
                 hits = await self._vs.query(namespace=str(project_id), query=paper.title, k=3)
                 if hits:
+                    # W1-A1: RAG snippets are chunked from the same poisoned-
+                    # paper-text source the abstract came from — wrap in <rag>
+                    # so a crafted PDF body can't issue instructions either.
                     snippets = " ".join(str(h.get("text", "")) for h in hits)
-                    rag_block = f"Related context: {snippets}\n"
+                    rag_block = f"Related context: {safe_tag('rag', snippets)}\n"
             except VectorStoreUnavailableError as exc:
                 _log.warning(
                     "critic_rag_query_failed", error_type=type(exc).__name__, error=str(exc)
                 )
 
+        # W1-A1: wrap untrusted reviewer feedback + paper title/abstract.
         feedback_block = (
-            f"Apply the following revision instruction: {feedback}\n\n" if feedback else ""
+            f"Apply the following revision instruction: {safe_tag('reviewer_feedback', feedback)}\n\n"
+            if feedback
+            else ""
+        )
+        paper_block = safe_tag(
+            "paper",
+            safe_tag("title", paper.title)
+            + safe_tag("abstract", paper.abstract or "(no abstract available)"),
+            attrs={"id": paper.citation_key},
+            raw=True,
         )
         prompt = _EXTRACTION_PROMPT_TEMPLATE.format(
             feedback_block=feedback_block,
-            citation_key=paper.citation_key,
-            title=paper.title,
-            abstract=paper.abstract or "(no abstract available)",
+            citation_key=xml_escape(paper.citation_key),
+            paper_block=paper_block,
             rag_block=rag_block,
+            system_anchor=SYSTEM_ANCHOR,
         )
         try:
             from google.genai import types as genai_types
