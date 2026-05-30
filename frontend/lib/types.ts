@@ -110,6 +110,27 @@ export interface ApiError {
   };
 }
 
+/** Export Pack formats (BRD FR-3.5). LaTeX intentionally absent. */
+export type ExportFormat = "markdown" | "bibtex" | "package" | "bundle";
+
+/** Phase-4 telemetry block (NFR-6 / §9). All counts are project-scoped. */
+export interface DraftingTelemetry {
+  sections_drafted: number;
+  regenerations: number;
+  overrides: number;
+  citation_corrections: number;
+  /** Mean of `draft_ms` across `phase_4.section_ready` rows; null if none. */
+  avg_section_ms: number | null;
+}
+
+/** Response shape from GET /projects/{id}/usage. */
+export interface UsageRollup {
+  tokens_in: number;
+  tokens_out: number;
+  cost_usd: number;
+  drafting: DraftingTelemetry;
+}
+
 /** One paper resolved against the approved pool (citation manager v1, FR-1.5). */
 export interface ResolvedCitation {
   citation_key: string;

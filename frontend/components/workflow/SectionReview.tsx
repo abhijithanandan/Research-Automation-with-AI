@@ -68,7 +68,7 @@ interface SectionReviewProps {
   onOverride: (payload: SectionOverridePayload) => void;
 }
 
-type Tab = "preview" | "source" | "citations";
+type Tab = "preview" | "source" | "citations" | "diff";
 type Action = "idle" | "reject" | "override";
 type EditView = "edit" | "diff" | "preview";
 
@@ -93,6 +93,9 @@ export function SectionReview({
   const [editView, setEditView] = useState<EditView>("edit");
   // Citation Manager v1 (FR-1.5) — source of truth from /drafting/citations.
   const [citations, setCitations] = useState<CitationPanel | null>(null);
+  // FR-1.4 diff view at the section gate — prior approved/rejected draft of
+  // the SAME section, surfaced when one exists (after reject→redraft).
+  const [prevContent, setPrevContent] = useState<string | null>(null);
   // Force-approve flow: when the backend returns 409 unresolved_citations.
   const [forceState, setForceState] = useState<
     { keys: string[]; reason: string } | null
@@ -144,9 +147,51 @@ export function SectionReview({
     };
   }, [section, sectionName, projectId]);
 
+  // ── Fetch the prior draft of THIS section, if one exists ─────────────
+  // The diff tab is only useful after a reject→redraft cycle. We list every
+  // section-kind artifact for the project, filter to the same label as the
+  // current section, sort by created_at desc, and pick artifacts[1] (the one
+  // immediately before the current one). Skip when no prior version exists.
+  useEffect(() => {
+    if (!section || !sectionName || !projectId) {
+      setPrevContent(null);
+      return;
+    }
+    let cancelled = false;
+    api.artifacts
+      .list(projectId, "section", DEV_TOKEN)
+      .then((sections) => {
+        const sameLabel = sections
+          .filter((a) => a.label === sectionName && a.id !== section.id)
+          .sort((a, b) => (b.created_at < a.created_at ? -1 : 1));
+        if (!cancelled) {
+          setPrevContent(sameLabel[0]?.content ?? null);
+        }
+      })
+      .catch(() => {
+        if (!cancelled) setPrevContent(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [section, sectionName, projectId]);
+
   const resolvedCitations = citations?.resolved ?? [];
   const unresolvedKeys = citations?.unresolved_keys ?? [];
   const citationCount = (citations?.cited_keys.length ?? 0);
+  // Diff between the prior draft and the current draft — read-only, computed
+  // only when the diff tab is the active tab so the LCS table is cheap.
+  const prevVsCurrentOps = useMemo(
+    () =>
+      tab === "diff" && prevContent !== null
+        ? diffLines(prevContent, sectionContent)
+        : [],
+    [tab, prevContent, sectionContent],
+  );
+  const prevVsCurrentStats = useMemo(
+    () => diffStats(prevVsCurrentOps),
+    [prevVsCurrentOps],
+  );
 
   function startEditing() {
     setEditContent(sectionContent);
@@ -326,6 +371,11 @@ export function SectionReview({
           <TabButton active={tab === "citations"} onClick={() => setTab("citations")}>
             Citations ({citationCount.toString()})
           </TabButton>
+          {prevContent !== null && (
+            <TabButton active={tab === "diff"} onClick={() => setTab("diff")}>
+              Diff vs previous
+            </TabButton>
+          )}
         </div>
 
         {/* Tab body */}
@@ -416,6 +466,21 @@ export function SectionReview({
                   </p>
                 </div>
               )}
+            </div>
+          )}
+
+          {tab === "diff" && prevContent !== null && (
+            <div className="space-y-3">
+              <div className="flex items-center justify-between gap-3 border-b border-border/60 pb-2">
+                <p className="text-[11px] font-medium uppercase tracking-wider text-muted">
+                  Previous draft (left) → current draft (right)
+                </p>
+                <div className="flex items-center gap-3 text-[11px]">
+                  <span className="text-primary">+{prevVsCurrentStats.added}</span>
+                  <span className="text-destructive">−{prevVsCurrentStats.removed}</span>
+                </div>
+              </div>
+              <DiffPane ops={prevVsCurrentOps} />
             </div>
           )}
         </div>

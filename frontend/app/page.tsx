@@ -3,6 +3,8 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import { ApprovalPanel, type OverridePayload } from "@/components/workflow/ApprovalPanel";
+import { DraftingTelemetryChips } from "@/components/workflow/DraftingTelemetryChips";
+import { ExportPanel } from "@/components/workflow/ExportPanel";
 import { Markdown } from "@/components/workflow/Markdown";
 import { PhaseTracker } from "@/components/workflow/PhaseTracker";
 import {
@@ -190,6 +192,8 @@ export default function HomePage() {
   const [completedPhase, setCompletedPhase] = useState<
     "discovery" | "synthesis" | "drafting" | null
   >(null);
+  // Bump whenever a section_ready event lands so the telemetry chips refetch.
+  const [telemetryRefresh, setTelemetryRefresh] = useState(0);
   const wsRef = useRef<ManagedSocket | null>(null);
 
   useEffect(() => {
@@ -228,6 +232,10 @@ export default function HomePage() {
           setCurrentSection(evt.section ?? null);
           setSectionLoading(true);
           setView("drafting");
+          // Each section gate means a fresh phase_4.section_ready audit row
+          // on the backend — bump the telemetry chips so they refetch /usage
+          // and the counters track live work.
+          setTelemetryRefresh((r) => r + 1);
           api.artifacts
             .list(projectId, "section", DEV_TOKEN)
             .then((sections) => {
@@ -601,6 +609,13 @@ export default function HomePage() {
           {view === "drafting" && (
             <div className="space-y-6 animate-fade-in">
               <AgentLog lines={logLines} endRef={logEndRef} />
+              {ctx && (
+                <DraftingTelemetryChips
+                  projectId={ctx.projectId}
+                  token={DEV_TOKEN}
+                  refreshKey={telemetryRefresh}
+                />
+              )}
               <SectionReview
                 section={sectionArtifact}
                 currentSection={currentSection}
@@ -791,39 +806,27 @@ export default function HomePage() {
                   <SynthesisReadOnly matrix={matrix} summary={summary} papers={papers} />
                 )}
 
-                {/* Phase 4: assembled manuscript + download — full-bleed. */}
-                {draftingDone && manuscript && (
-                  <div className="space-y-4">
-                    <div className="flex items-center justify-between">
+                {/* Phase 4: assembled manuscript + Export Pack picker. */}
+                {draftingDone && manuscript && ctx && (
+                  <div className="space-y-6">
+                    <DraftingTelemetryChips
+                      projectId={ctx.projectId}
+                      token={DEV_TOKEN}
+                      refreshKey={telemetryRefresh}
+                    />
+
+                    <ExportPanel projectId={ctx.projectId} token={DEV_TOKEN} />
+
+                    <div className="space-y-3">
                       <p className="font-mono text-[10px] uppercase tracking-[0.18em] text-muted-foreground">
-                        Final manuscript
+                        Final manuscript preview
                       </p>
-                      <button
-                        type="button"
-                        onClick={() => {
-                          const blob = new Blob([manuscript.content], { type: "text/markdown" });
-                          const url = URL.createObjectURL(blob);
-                          const a = document.createElement("a");
-                          a.href = url;
-                          a.download = `${(title || "manuscript").replace(/[^\w.-]+/g, "_")}.md`;
-                          document.body.appendChild(a);
-                          a.click();
-                          a.remove();
-                          URL.revokeObjectURL(url);
-                        }}
-                        className="inline-flex items-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-semibold text-primary transition-all duration-200 hover:bg-primary/10"
-                      >
-                        <svg className="h-3 w-3" viewBox="0 0 16 16" fill="none">
-                          <path d="M8 2v9m0 0l-3-3m3 3l3-3M3 13h10" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
-                        </svg>
-                        Download .md
-                      </button>
-                    </div>
-                    {/* max-w-[68ch] caps line length at the optimal reading
-                        measure so prose never stretches across an ultrawide
-                        monitor. Centered, generous vertical scroll region. */}
-                    <div className="mx-auto max-h-[72vh] max-w-[68ch] overflow-y-auto pr-2">
-                      <Markdown content={manuscript.content} variant="prose" />
+                      {/* max-w-[68ch] caps line length at the optimal reading
+                          measure so prose never stretches across an ultrawide
+                          monitor. Centered, generous vertical scroll region. */}
+                      <div className="mx-auto max-h-[72vh] max-w-[68ch] overflow-y-auto pr-2">
+                        <Markdown content={manuscript.content} variant="prose" />
+                      </div>
                     </div>
                   </div>
                 )}

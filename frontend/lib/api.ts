@@ -1,7 +1,14 @@
 // Typed REST client. Mirrors SPEC.md §3.
 // Every API call must go through this file — do not call `fetch` from components.
 
-import type { Artifact, CitationPanel, Paper, Project } from "./types";
+import type {
+  Artifact,
+  CitationPanel,
+  ExportFormat,
+  Paper,
+  Project,
+  UsageRollup,
+} from "./types";
 
 const BASE_URL =
   process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8000";
@@ -85,6 +92,49 @@ export function extractError(status: number, body: unknown): ApiError {
     body,
     e.error?.trace_id,
   );
+}
+
+/** Download a binary attachment (Export Pack, FR-3.5). Returns the file's
+ *  blob + the server-suggested filename (parsed from Content-Disposition).
+ *  Errors flow through the same ApiError pipeline as request<T>(). */
+export async function requestBlob(
+  path: string,
+  opts: FetchOptions = {},
+): Promise<{ blob: Blob; filename: string }> {
+  const { token, headers, ...rest } = opts;
+  let res: Response;
+  try {
+    res = await fetch(`${BASE_URL}/api/v1${path}`, {
+      ...rest,
+      headers: {
+        ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        ...headers,
+      },
+    });
+  } catch (exc) {
+    throw new ApiError(
+      "network",
+      0,
+      "network_error",
+      exc instanceof Error ? exc.message : "Network request failed",
+      null,
+    );
+  }
+  if (!res.ok) {
+    let body: unknown;
+    try {
+      body = await res.json();
+    } catch {
+      body = { error: { code: "unknown", message: res.statusText } };
+    }
+    throw extractError(res.status, body);
+  }
+  // Content-Disposition: attachment; filename="manuscript-package.zip"
+  const cd = res.headers.get("Content-Disposition") ?? "";
+  const m = /filename\*?=(?:UTF-8'')?"?([^";]+)"?/i.exec(cd);
+  const raw = m?.[1];
+  const filename = raw ? decodeURIComponent(raw) : "download";
+  return { blob: await res.blob(), filename };
 }
 
 async function request<T>(path: string, opts: FetchOptions = {}): Promise<T> {
@@ -227,5 +277,21 @@ export const api = {
         `/projects/${projectId}/artifacts${kind ? `?kind=${kind}` : ""}`,
         { token },
       ),
+  },
+
+  exports: {
+    /** Download the manuscript in one of four formats (FR-3.5). Returns
+     *  { blob, filename } — the caller saves it via an <a download> dance. */
+    download: (projectId: string, format: ExportFormat, token: string) =>
+      requestBlob(
+        `/projects/${projectId}/export?format=${format}`,
+        { token },
+      ),
+  },
+
+  usage: {
+    /** Token + cost rollup + Phase-4 drafting{} telemetry block (NFR-6 / §9). */
+    get: (projectId: string, token: string) =>
+      request<UsageRollup>(`/projects/${projectId}/usage`, { token }),
   },
 };
