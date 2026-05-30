@@ -294,6 +294,22 @@ def test_apply_citation_corrections_rewrites_only_markers() -> None:
     assert "word ghost2099 stays" in out
 
 
+@pytest.mark.asyncio
+async def test_approved_citation_keys_returns_pool_membership(
+    db_session: AsyncSession,
+) -> None:
+    """W1-A2 helper: approved_citation_keys returns the project's approved set."""
+    from app.services.citations import approved_citation_keys
+
+    db_session.add(_paper("lecun2015", approved=True))
+    db_session.add(_paper("bengio2003", approved=True))
+    db_session.add(_paper("not_approved", approved=False))
+    await db_session.flush()
+
+    keys = await approved_citation_keys(db_session, TEST_PROJECT_ID)
+    assert keys == {"lecun2015", "bengio2003"}
+
+
 # ===========================================================================
 # Phase-4 Telemetry (NFR-6 / §9)
 # ===========================================================================

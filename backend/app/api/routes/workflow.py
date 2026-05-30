@@ -178,9 +178,28 @@ async def override(
 
     # FR-1.5 citation correction: replace any malformed `[@bad]` markers with the
     # reviewer-chosen valid `[@good]` keys, then record the human edit for audit.
+    # W1-A2: replacement keys MUST be in the approved pool — otherwise we'd
+    # rewrite one hallucinated key to another and lie about it in the audit log.
     content = payload.content
     if payload.citation_corrections:
-        from app.services.citations import apply_citation_corrections
+        from app.services.citations import (
+            apply_citation_corrections,
+            approved_citation_keys,
+        )
+
+        approved = await approved_citation_keys(db, project_id)
+        replacements = set(payload.citation_corrections.values())
+        bad_replacements = sorted(replacements - approved)
+        if bad_replacements:
+            raise HTTPException(
+                # FastAPI deprecated _ENTITY in favor of _CONTENT; same 422.
+                status.HTTP_422_UNPROCESSABLE_CONTENT,
+                detail={
+                    "code": "invalid_citation_correction",
+                    "message": ("citation_corrections target keys must be in the approved pool"),
+                    "bad_replacements": bad_replacements,
+                },
+            )
 
         content = apply_citation_corrections(content, payload.citation_corrections)
         await wf_svc.record_citation_correction(
