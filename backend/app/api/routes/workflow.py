@@ -99,7 +99,15 @@ async def get_workflow(project_id: UUID, user: CurrentUser, db: DbSession) -> Wo
     return wf_svc._run_to_schema(run)
 
 
-@router.post("/approve", response_model=WorkflowRun)
+@router.post(
+    "/approve",
+    response_model=WorkflowRun,
+    # W2-S2: cap per-user approve spam — even a successful approve writes
+    # audit rows and triggers a graph resume. 30/min is well above any
+    # human reviewer cadence (one approve every 2s sustained) but stops
+    # a runaway client.
+    dependencies=[Depends(rate_limit("workflow.approve", max_per_window=30))],
+)
 async def approve(
     project_id: UUID, payload: ApprovePayload, user: CurrentUser, db: DbSession
 ) -> WorkflowRun:
@@ -150,7 +158,13 @@ async def approve(
     )
 
 
-@router.post("/reject", response_model=WorkflowRun)
+@router.post(
+    "/reject",
+    response_model=WorkflowRun,
+    # W2-S2: same posture as approve. Reject triggers an agent regenerate
+    # (LLM call → tokens, money). 30/min/user.
+    dependencies=[Depends(rate_limit("workflow.reject", max_per_window=30))],
+)
 async def reject(
     project_id: UUID, payload: FeedbackPayload, user: CurrentUser, db: DbSession
 ) -> WorkflowRun:
@@ -168,7 +182,14 @@ async def reject(
     return await wf_svc.reject_workflow(db, project_id, run.id, user.id, feedback)
 
 
-@router.post("/override", response_model=WorkflowRun)
+@router.post(
+    "/override",
+    response_model=WorkflowRun,
+    # W2-S2: override writes up to 256 KB into ArtifactRow + 1 audit row.
+    # 20/min is the tightest of the three (DB write blast radius is the
+    # largest of the gate endpoints).
+    dependencies=[Depends(rate_limit("workflow.override", max_per_window=20))],
+)
 async def override(
     project_id: UUID, payload: OverridePayload, user: CurrentUser, db: DbSession
 ) -> WorkflowRun:

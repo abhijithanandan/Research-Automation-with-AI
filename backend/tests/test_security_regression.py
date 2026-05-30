@@ -403,3 +403,69 @@ async def test_http_auth_failure_log_does_not_leak_token() -> None:
     assert "SENSITIVE_JWT_PAYLOAD" not in blob
     # But the forensic field must be present.
     assert any(c.get("error_type") for c in captured), "error_type must be logged for triage"
+
+
+# ===========================================================================
+# W2-S2 — Per-user rate limits on workflow mutation endpoints
+# ===========================================================================
+
+
+@pytest.mark.asyncio
+async def test_workflow_approve_rate_limit_30_per_window() -> None:
+    """approve route rate-limited at 30/min/user (W2-S2)."""
+    from app.api.rate_limit import _check, _reset_for_tests
+
+    _reset_for_tests()
+    for _ in range(30):
+        assert await _check(
+            "workflow.approve", "user-A", max_per_window=30, window_seconds=60.0
+        )
+    assert not await _check(
+        "workflow.approve", "user-A", max_per_window=30, window_seconds=60.0
+    )
+
+
+@pytest.mark.asyncio
+async def test_workflow_reject_rate_limit_30_per_window() -> None:
+    """reject route rate-limited at 30/min/user (W2-S2)."""
+    from app.api.rate_limit import _check, _reset_for_tests
+
+    _reset_for_tests()
+    for _ in range(30):
+        assert await _check(
+            "workflow.reject", "user-A", max_per_window=30, window_seconds=60.0
+        )
+    assert not await _check(
+        "workflow.reject", "user-A", max_per_window=30, window_seconds=60.0
+    )
+
+
+@pytest.mark.asyncio
+async def test_workflow_override_rate_limit_20_per_window() -> None:
+    """override route rate-limited at 20/min/user (W2-S2). Tighter than the
+    others because override writes up to 256 KB into ArtifactRow per call."""
+    from app.api.rate_limit import _check, _reset_for_tests
+
+    _reset_for_tests()
+    for _ in range(20):
+        assert await _check(
+            "workflow.override", "user-A", max_per_window=20, window_seconds=60.0
+        )
+    assert not await _check(
+        "workflow.override", "user-A", max_per_window=20, window_seconds=60.0
+    )
+
+
+def test_workflow_routes_declare_rate_limit_dependencies() -> None:
+    """Each /workflow mutation route MUST declare a rate_limit dependency.
+    Static-source check so a future refactor cannot silently drop a quota."""
+    import inspect
+
+    from app.api.routes.workflow import approve, override, reject
+
+    src = inspect.getsource(approve)
+    assert "workflow.approve" in src and "max_per_window=30" in src
+    src = inspect.getsource(reject)
+    assert "workflow.reject" in src and "max_per_window=30" in src
+    src = inspect.getsource(override)
+    assert "workflow.override" in src and "max_per_window=20" in src
