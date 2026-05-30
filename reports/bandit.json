@@ -1,17 +1,17 @@
 {
   "errors": [],
-  "generated_at": "2026-05-30T20:05:53Z",
+  "generated_at": "2026-05-30T20:27:30Z",
   "metrics": {
     "_totals": {
-      "CONFIDENCE.HIGH": 7,
+      "CONFIDENCE.HIGH": 5,
       "CONFIDENCE.LOW": 0,
       "CONFIDENCE.MEDIUM": 0,
       "CONFIDENCE.UNDEFINED": 0,
       "SEVERITY.HIGH": 0,
-      "SEVERITY.LOW": 6,
-      "SEVERITY.MEDIUM": 1,
+      "SEVERITY.LOW": 5,
+      "SEVERITY.MEDIUM": 0,
       "SEVERITY.UNDEFINED": 0,
-      "loc": 6186,
+      "loc": 6210,
       "nosec": 0,
       "skipped_tests": 0
     },
@@ -245,7 +245,7 @@
       "SEVERITY.LOW": 0,
       "SEVERITY.MEDIUM": 0,
       "SEVERITY.UNDEFINED": 0,
-      "loc": 155,
+      "loc": 170,
       "nosec": 0,
       "skipped_tests": 0
     },
@@ -414,20 +414,20 @@
       "SEVERITY.LOW": 0,
       "SEVERITY.MEDIUM": 0,
       "SEVERITY.UNDEFINED": 0,
-      "loc": 145,
+      "loc": 153,
       "nosec": 0,
       "skipped_tests": 0
     },
     "app\\services\\discovery.py": {
-      "CONFIDENCE.HIGH": 2,
+      "CONFIDENCE.HIGH": 0,
       "CONFIDENCE.LOW": 0,
       "CONFIDENCE.MEDIUM": 0,
       "CONFIDENCE.UNDEFINED": 0,
       "SEVERITY.HIGH": 0,
-      "SEVERITY.LOW": 1,
-      "SEVERITY.MEDIUM": 1,
+      "SEVERITY.LOW": 0,
+      "SEVERITY.MEDIUM": 0,
       "SEVERITY.UNDEFINED": 0,
-      "loc": 567,
+      "loc": 568,
       "nosec": 0,
       "skipped_tests": 0
     },
@@ -589,46 +589,6 @@
       "more_info": "https://bandit.readthedocs.io/en/1.9.4/plugins/b101_assert_used.html",
       "test_id": "B101",
       "test_name": "assert_used"
-    },
-    {
-      "code": "14 import re\n15 import xml.etree.ElementTree as ET\n16 from datetime import UTC, datetime\n",
-      "col_offset": 0,
-      "end_col_offset": 34,
-      "filename": "app\\services\\discovery.py",
-      "issue_confidence": "HIGH",
-      "issue_cwe": {
-        "id": 20,
-        "link": "https://cwe.mitre.org/data/definitions/20.html"
-      },
-      "issue_severity": "LOW",
-      "issue_text": "Using xml.etree.ElementTree to parse untrusted XML data is known to be vulnerable to XML attacks. Replace xml.etree.ElementTree with the equivalent defusedxml package, or make sure defusedxml.defuse_stdlib() is called.",
-      "line_number": 15,
-      "line_range": [
-        15
-      ],
-      "more_info": "https://bandit.readthedocs.io/en/1.9.4/blacklists/blacklist_imports.html#b405-import-xml-etree",
-      "test_id": "B405",
-      "test_name": "blacklist"
-    },
-    {
-      "code": "251         try:\n252             root = ET.fromstring(resp.text)\n253         except ET.ParseError as exc:\n",
-      "col_offset": 19,
-      "end_col_offset": 43,
-      "filename": "app\\services\\discovery.py",
-      "issue_confidence": "HIGH",
-      "issue_cwe": {
-        "id": 20,
-        "link": "https://cwe.mitre.org/data/definitions/20.html"
-      },
-      "issue_severity": "MEDIUM",
-      "issue_text": "Using xml.etree.ElementTree.fromstring to parse untrusted XML data is known to be vulnerable to XML attacks. Replace xml.etree.ElementTree.fromstring with its defusedxml equivalent function or make sure defusedxml.defuse_stdlib() is called",
-      "line_number": 252,
-      "line_range": [
-        252
-      ],
-      "more_info": "https://bandit.readthedocs.io/en/1.9.4/blacklists/blacklist_calls.html#b313-b320-xml-bad-elementtree",
-      "test_id": "B314",
-      "test_name": "blacklist"
     },
     {
       "code": "256                 pages.append(page.extract_text() or \"\")\n257             except Exception:\n258                 # Some malformed pages throw inside pypdf \u2014 skip them.\n259                 continue\n260         # Re-join pages with a paragraph break so the chunker sees natural\n",

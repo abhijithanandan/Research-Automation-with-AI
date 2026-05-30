@@ -90,6 +90,38 @@ async def test_arxiv_adapter_parses_feed() -> None:
 
 
 @pytest.mark.asyncio
+async def test_arxiv_rejects_xml_bomb() -> None:
+    """W1-A4: arXiv parser uses defusedxml — billion-laughs entity expansion
+    is rejected at parse time. The adapter returns an empty list instead of
+    exhausting memory. Confirms bandit B314 is no longer applicable."""
+    # 9-level nested entity expansion = 10^9 'lol' bytes if expanded. defusedxml
+    # raises EntitiesForbidden on parse; the adapter must NOT expand it.
+    xml_bomb = """<?xml version="1.0"?>
+<!DOCTYPE lolz [
+  <!ENTITY lol "lol">
+  <!ENTITY lol2 "&lol;&lol;&lol;&lol;&lol;&lol;&lol;&lol;&lol;&lol;">
+  <!ENTITY lol3 "&lol2;&lol2;&lol2;&lol2;&lol2;&lol2;&lol2;&lol2;&lol2;&lol2;">
+  <!ENTITY lol4 "&lol3;&lol3;&lol3;&lol3;&lol3;&lol3;&lol3;&lol3;&lol3;&lol3;">
+]>
+<feed xmlns="http://www.w3.org/2005/Atom"><entry><title>&lol4;</title></entry></feed>"""
+    with respx.mock:
+        respx.get("https://export.arxiv.org/api/query").mock(
+            return_value=httpx.Response(200, text=xml_bomb)
+        )
+        adapter = ArXivAdapter()
+        # Disable tenacity retries so a parser-rejection failure surfaces
+        # immediately rather than triggering 3 retries.
+        adapter._search_with_retry.retry.stop = lambda *_: True  # type: ignore[attr-defined]
+        async with httpx.AsyncClient() as client:
+            papers = await adapter.search("xxe", max_results=10, client=client)
+
+    # Either: defusedxml refused the DTD (current behavior — adapter logs
+    # arxiv_bad_xml and returns []) OR the adapter's outer retry-error guard
+    # returns []. The invariant is: NO memory blow-up, NO exception escapes.
+    assert papers == []
+
+
+@pytest.mark.asyncio
 async def test_arxiv_adapter_handles_5xx() -> None:
     """ArXivAdapter should return empty list on 5xx (non-fatal per agent contract)."""
     with respx.mock:

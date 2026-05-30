@@ -47,6 +47,11 @@ dependencies = [
     # for (Semantic Scholar openAccessPdf, arXiv) and embed into ChromaDB for
     # the Critic's RAG context (BRD FR-1.2 — local document parser).
     "pypdf>=4.0",
+    # W1-A4: XXE / billion-laughs defense for arXiv Atom-feed parsing in
+    # services/discovery.py. defusedxml.ElementTree is API-compatible with
+    # stdlib xml.etree but rejects entity-expansion and external-entity
+    # references on parse. bandit B314/B405 stop firing once this is in.
+    "defusedxml>=0.7",
 ]
 
 [project.optional-dependencies]

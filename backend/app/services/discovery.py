@@ -12,12 +12,19 @@ fans them out in parallel and merges results.
 from __future__ import annotations
 
 import re
-import xml.etree.ElementTree as ET
 from datetime import UTC, datetime
 from typing import Protocol
 from uuid import uuid4
 
 import httpx
+
+# W1-A4: defusedxml is a drop-in replacement for xml.etree.ElementTree.fromstring
+# that rejects entity-expansion (billion-laughs) and external-entity references
+# on parse. arXiv is trusted today, but a malicious mirror or MITM could ship a
+# crafted Atom feed otherwise. ParseError is re-exported by defusedxml with the
+# same identity as stdlib's so existing `except ParseError` branches still work.
+from defusedxml.ElementTree import ParseError
+from defusedxml.ElementTree import fromstring as _safe_fromstring
 from tenacity import RetryError, retry, stop_after_attempt, wait_exponential
 
 from app.models.schemas import Paper
@@ -249,8 +256,11 @@ class ArXivAdapter:
         # feeds, especially during their maintenance windows. A ParseError
         # would otherwise crash this whole query lane (audit finding #7).
         try:
-            root = ET.fromstring(resp.text)
-        except ET.ParseError as exc:
+            # W1-A4: defusedxml fromstring — rejects DTDs / entity expansion /
+            # external entities. Same ParseError class as stdlib on malformed
+            # but otherwise-safe XML.
+            root = _safe_fromstring(resp.text)
+        except ParseError as exc:
             _log.warning("arxiv_bad_xml", query=query, error=str(exc))
             return []
         ns = {"atom": _ARXIV_NS}
