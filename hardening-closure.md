@@ -99,9 +99,49 @@ This closure represents the **audit-pass output only**:
 
 ---
 
-## Wave 1 closure (TBD)
+## Wave 1 closure (2026-05-31)
 
-> Append metrics + sign-off after A1, A2, A3, A4 land. Required CI: green on the new gates. Required tests: 4 new cases listed in the backlog.
+All four Wave-1 tickets landed on `audit/2026-05-31`. Commits (oldest first):
+
+| Commit | Ticket | Summary |
+| --- | --- | --- |
+| `c51daef` | W1-A2 | Validate `citation_corrections` against the approved pool (returns 422 `invalid_citation_correction` on bad replacement keys) |
+| `c88ea90` | W1-A4 | Replace `xml.etree` with `defusedxml` on arXiv Atom parsing (kills bandit B314 MEDIUM + B405 LOW) |
+| `f370ebe` | W1-A3 | Bump `next` 14.2.5 → 14.2.35 (closes 5 GHSAs incl. CRITICAL cache poisoning) |
+| `90752e4` | W1-A1 | XML-encapsulate untrusted strings in Scribe + Critic prompts (OWASP LLM01) |
+
+### Metrics delta — baseline vs Wave-1 closure
+
+| Metric | Baseline | Wave-1 target | Wave-1 actual |
+| --- | --- | --- | --- |
+| Bandit HIGH | 0 | 0 | **0** ✅ |
+| Bandit MEDIUM | 1 | 0 | **0** ✅ (B314/B405 cleared by defusedxml) |
+| Bandit LOW | 6 | 6 | 5 (B405 removed alongside B314) |
+| npm audit CRITICAL | 1 | 0 | **0** ✅ (next 14.2.35) |
+| npm audit HIGH | (under-counted as CRIT) | 0 | 4 non-applicable HIGH (image/RSC/rewrites — features not used; accepted risk documented in commit) |
+| pytest count | 294 | ≥298 | **307** ✅ (+13: A2 ×3, A4 ×1, A1 ×9) |
+| pytest pass rate | 100% | 100% | 100% ✅ |
+| ruff / format / mypy --strict | clean | clean | clean ✅ |
+| Findings: High | 4 | 0 | **0** ✅ |
+| Findings: Medium | 7 | 7 (carry to Wave 2) | 7 (unchanged) |
+| Findings: Low | 8 | 8 | 8 (unchanged) |
+
+### Newly accepted risks (Wave 1)
+
+- **Residual npm-audit HIGHs on `next@14.2.35`**: 4 advisories (image-optimiser remotePatterns DoS, RSC HTTP-deserialisation DoS, rewrites request-smuggling, postcss CSS-stringify XSS) — *not exploitable in this app* (no `next/image` use, no `remotePatterns`, no rewrites/redirects in `next.config.mjs`, postcss is build-time). Fix is a Next 15.x / 16.x major bump; defer-ticketed for Wave 2.
+
+### Sign-off
+
+Wave 1 is **complete and merge-ready to `main`**. All HIGH findings cleared; bandit gate now passes locally; the 4 acceptance tests promised in the backlog are green plus 9 supplementary cases (16 total). The audit branch carries 5 commits on top of `feature/phase-4 @ 95d227e`:
+
+```
+90752e4 fix(wave-1/A1): encapsulate untrusted strings in Scribe + Critic prompts
+f370ebe fix(wave-1/A3): bump next 14.2.5 -> 14.2.35 (closes CRITICAL CVEs)
+c88ea90 fix(wave-1/A4): use defusedxml for arXiv Atom-feed parsing
+c51daef fix(wave-1/A2): validate citation_corrections against the approved pool
+91f8df6 audit(2026-05-31): findings matrix + remediation backlog + CI gates + closure
+13b1c5d audit(2026-05-31): freeze baseline + machine-readable scanner reports
+```
 
 ## Wave 2 closure (TBD)
 
