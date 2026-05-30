@@ -11,6 +11,7 @@ fans them out in parallel and merges results.
 
 from __future__ import annotations
 
+import asyncio
 import re
 from datetime import UTC, datetime
 from typing import Protocol
@@ -34,6 +35,47 @@ _log = get_logger(__name__)
 
 # Shared async client (re-used across adapter calls within a single request).
 _HTTP_TIMEOUT = httpx.Timeout(30.0)
+
+# W2-S3: honor Retry-After on 429 before letting tenacity retry. Capped at
+# this many seconds so a malicious or buggy upstream sending Retry-After: 9999
+# can't hang a workflow for hours. tenacity's wait_exponential floor (1s) is
+# replaced by whatever the server asked for, then bounded.
+_RETRY_AFTER_MAX_S = 60.0
+
+
+async def _sleep_for_retry_after(resp: httpx.Response) -> None:
+    """Sleep for the value of the Retry-After header (capped at 60s).
+
+    Supports the two RFC-7231 formats: delta-seconds (integer) and HTTP-date.
+    HTTP-date is rare on 429s (most public APIs send integers) but we honor
+    it for defense in depth. Missing or unparseable header → no sleep, let
+    tenacity's exponential backoff handle it.
+    """
+    raw = resp.headers.get("Retry-After")
+    if not raw:
+        return
+    raw = raw.strip()
+    delay: float | None = None
+    # Delta-seconds form.
+    if raw.isdigit():
+        delay = float(raw)
+    else:
+        # HTTP-date form — parsedate_to_datetime tolerates the RFC-1123 shape
+        # ("Wed, 21 Oct 2015 07:28:00 GMT"). On failure we just skip.
+        try:
+            from email.utils import parsedate_to_datetime
+
+            target = parsedate_to_datetime(raw)
+            delta = (target - datetime.now(tz=UTC)).total_seconds()
+            if delta > 0:
+                delay = delta
+        except (TypeError, ValueError):
+            delay = None
+    if delay is None or delay <= 0:
+        return
+    capped = min(delay, _RETRY_AFTER_MAX_S)
+    _log.info("retry_after_sleep", seconds=capped, raw=raw[:32])
+    await asyncio.sleep(capped)
 
 
 def _safe_json(resp: httpx.Response, source: str, query: str) -> dict[str, object] | None:
@@ -144,7 +186,13 @@ class SemanticScholarAdapter:
             status_code = exc.response.status_code
             _log.warning("semantic_scholar_error", status=status_code, query=query)
             # Re-raise on transient errors so tenacity retries; swallow 4xx client errors.
-            if status_code in (429,) or status_code >= 500:
+            # W2-S3: honor Retry-After on 429 before re-raising — lets tenacity's
+            # next attempt happen after the server-requested cooldown instead of
+            # the default exponential floor.
+            if status_code == 429:
+                await _sleep_for_retry_after(exc.response)
+                raise
+            if status_code >= 500:
                 raise
             return []
 
@@ -248,7 +296,11 @@ class ArXivAdapter:
         except httpx.HTTPStatusError as exc:
             status_code = exc.response.status_code
             _log.warning("arxiv_error", status=status_code, query=query)
-            if status_code in (429,) or status_code >= 500:
+            # W2-S3: honor Retry-After on 429 before re-raising for tenacity.
+            if status_code == 429:
+                await _sleep_for_retry_after(exc.response)
+                raise
+            if status_code >= 500:
                 raise
             return []
 
@@ -382,7 +434,11 @@ class CrossrefAdapter:
             status_code = exc.response.status_code
             _log.warning("crossref_error", status=status_code, query=query)
             # Retry transient failures; swallow 4xx client errors.
-            if status_code in (429,) or status_code >= 500:
+            # W2-S3: honor Retry-After on 429 before re-raising for tenacity.
+            if status_code == 429:
+                await _sleep_for_retry_after(exc.response)
+                raise
+            if status_code >= 500:
                 raise
             return []
 
@@ -507,7 +563,11 @@ class CoreAdapter:
         except httpx.HTTPStatusError as exc:
             status_code = exc.response.status_code
             _log.warning("core_error", status=status_code, query=query)
-            if status_code in (429,) or status_code >= 500:
+            # W2-S3: honor Retry-After on 429 before re-raising for tenacity.
+            if status_code == 429:
+                await _sleep_for_retry_after(exc.response)
+                raise
+            if status_code >= 500:
                 raise
             return []
 
@@ -621,7 +681,11 @@ class EuropePMCAdapter:
         except httpx.HTTPStatusError as exc:
             status_code = exc.response.status_code
             _log.warning("europe_pmc_error", status=status_code, query=query)
-            if status_code in (429,) or status_code >= 500:
+            # W2-S3: honor Retry-After on 429 before re-raising for tenacity.
+            if status_code == 429:
+                await _sleep_for_retry_after(exc.response)
+                raise
+            if status_code >= 500:
                 raise
             return []
 
