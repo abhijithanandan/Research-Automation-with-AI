@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """
 Generate PHASE1_PROCEDURES.pdf from PHASE1_PROCEDURES.md
 Review-meeting quality: cover page, section headers, color blocks.
@@ -7,55 +6,60 @@ Pure ASCII source file - no Unicode in comments or strings.
 
 import re
 from pathlib import Path
+
 from fpdf import FPDF
 
 # Anchor input/output paths to the script's directory so the helper works
 # regardless of which cwd the user runs it from (coderabbit PR #5 finding).
 _HERE = Path(__file__).resolve().parent
-MD_PATH  = str(_HERE / "PHASE1_PROCEDURES.md")
+MD_PATH = str(_HERE / "PHASE1_PROCEDURES.md")
 PDF_PATH = str(_HERE / "PHASE1_PROCEDURES.pdf")
 
 # Colour palette (R, G, B)
-C_NAVY       = (15,  40,  90)
-C_BLUE       = (30,  80, 180)
+C_NAVY = (15, 40, 90)
+C_BLUE = (30, 80, 180)
 C_BLUE_LIGHT = (70, 120, 200)
-C_GREEN      = (16, 120,  80)
-C_GREEN_BG   = (230, 248, 238)
-C_AMBER      = (160,  90,   0)
-C_AMBER_BG   = (255, 248, 220)
-C_RED        = (160,  30,  30)
-C_RED_BG     = (255, 235, 235)
-C_SLATE      = (55,  65,  81)
-C_MUTED      = (107, 114, 128)
-C_BORDER     = (200, 210, 225)
-C_CODE_BG    = (245, 247, 250)
-C_CODE_FG    = (30,  50,  80)
-C_WHITE      = (255, 255, 255)
-C_BLACK      = (20,  20,  20)
-C_ROW_ALT    = (245, 248, 255)
+C_GREEN = (16, 120, 80)
+C_GREEN_BG = (230, 248, 238)
+C_AMBER = (160, 90, 0)
+C_AMBER_BG = (255, 248, 220)
+C_RED = (160, 30, 30)
+C_RED_BG = (255, 235, 235)
+C_SLATE = (55, 65, 81)
+C_MUTED = (107, 114, 128)
+C_BORDER = (200, 210, 225)
+C_CODE_BG = (245, 247, 250)
+C_CODE_FG = (30, 50, 80)
+C_WHITE = (255, 255, 255)
+C_BLACK = (20, 20, 20)
+C_ROW_ALT = (245, 248, 255)
 
 
+# The left column holds the exact Unicode chars this script translates to ASCII.
+# RUF001 (ambiguous unicode) is suppressed per-line — that's literally the
+# data this table is built to recognise; it isn't a typo of a similar-looking
+# ASCII char.
 REPLACEMENTS = [
-    (u"—", "--"),
-    (u"–", "-"),
-    (u"‘", "'"),
-    (u"’", "'"),
-    (u"“", '"'),
-    (u"”", '"'),
-    (u"•", "*"),
-    (u"…", "..."),
-    (u"→", "->"),
-    (u"←", "<-"),
-    (u"✓", "OK"),
-    (u"✔", "[x]"),
-    (u"▶", ">"),
-    (u"▼", "v"),
-    (u"▲", "^"),
-    (u"±", "+/-"),
-    (u"×", "x"),
-    (u"÷", "/"),
-    (u"─", "-"),
-    (u"│", "|"),
+    ("—", "--"),
+    ("–", "-"),  # noqa: RUF001
+    ("‘", "'"),  # noqa: RUF001
+    ("’", "'"),  # noqa: RUF001
+    ("“", '"'),
+    ("”", '"'),
+    ("•", "*"),
+    ("…", "..."),
+    ("→", "->"),
+    ("←", "<-"),
+    ("✓", "OK"),
+    ("✔", "[x]"),
+    ("▶", ">"),
+    ("▼", "v"),
+    ("▲", "^"),
+    ("±", "+/-"),
+    ("×", "x"),  # noqa: RUF001
+    ("÷", "/"),
+    ("─", "-"),
+    ("│", "|"),
 ]
 
 
@@ -67,8 +71,8 @@ def esc(text):
 
 def strip_inline(text):
     text = re.sub(r"\*\*(.+?)\*\*", r"\1", text)
-    text = re.sub(r"\*(.+?)\*",     r"\1", text)
-    text = re.sub(r"`(.+?)`",        r"\1", text)
+    text = re.sub(r"\*(.+?)\*", r"\1", text)
+    text = re.sub(r"`(.+?)`", r"\1", text)
     text = re.sub(r"\[([^\]]+)\]\([^\)]+\)", r"\1", text)
     return text
 
@@ -79,9 +83,9 @@ class ReviewPDF(FPDF):
             return
         self.set_font("Helvetica", "B", 7)
         self.set_text_color(*C_MUTED)
-        self.cell(0, 6,
-            "ResearchFlow AI  |  Phase 1 Sprint Review Report  |  19 May 2026",
-            align="L")
+        self.cell(
+            0, 6, "ResearchFlow AI  |  Phase 1 Sprint Review Report  |  19 May 2026", align="L"
+        )
         self.ln(0)
         self.set_draw_color(*C_BORDER)
         self.line(self.l_margin, self.get_y(), self.w - self.r_margin, self.get_y())
@@ -96,7 +100,7 @@ class ReviewPDF(FPDF):
         self.ln(1)
         self.set_font("Helvetica", "I", 7)
         self.set_text_color(*C_MUTED)
-        self.cell(0, 6, "Page %d" % (self.page_no() - 1), align="C")
+        self.cell(0, 6, f"Page {self.page_no() - 1}", align="C")
 
     def cover(self):
         self.add_page()
@@ -113,8 +117,9 @@ class ReviewPDF(FPDF):
         self.set_xy(10, 18)
         self.set_font("Helvetica", "", 9)
         self.set_text_color(180, 200, 230)
-        self.cell(0, 6, "Agentic Research Automation  |  Human-in-the-Loop Orchestration",
-                  align="L")
+        self.cell(
+            0, 6, "Agentic Research Automation  |  Human-in-the-Loop Orchestration", align="L"
+        )
 
         self.set_xy(10, 48)
         self.set_font("Helvetica", "B", 28)
@@ -141,11 +146,11 @@ class ReviewPDF(FPDF):
         self.cell(66, 6, "STATUS: COMPLETE", align="L")
 
         meta = [
-            ("Review Date",   "19 May 2026"),
-            ("Branch",        "feature/phase-1"),
+            ("Review Date", "19 May 2026"),
+            ("Branch", "feature/phase-1"),
             ("Total Commits", "24"),
-            ("LLM Model",     "Gemini 2.0 Flash"),
-            ("Status",        "All B1-B4 blockers resolved"),
+            ("LLM Model", "Gemini 2.0 Flash"),
+            ("Status", "All B1-B4 blockers resolved"),
         ]
         y = 122
         for label, value in meta:
@@ -164,9 +169,9 @@ class ReviewPDF(FPDF):
         self.set_xy(10, 283)
         self.set_font("Helvetica", "", 7)
         self.set_text_color(160, 180, 220)
-        self.cell(0, 6,
-            "Confidential - Internal Review Document  |  ResearchFlow AI  |  2026",
-            align="C")
+        self.cell(
+            0, 6, "Confidential - Internal Review Document  |  ResearchFlow AI  |  2026", align="C"
+        )
 
     # Helpers
     def section_h1(self, text):
@@ -232,7 +237,7 @@ class ReviewPDF(FPDF):
     def numbered_item(self, text, n, indent=0):
         self.set_font("Helvetica", "", 9)
         self.set_text_color(*C_BLACK)
-        prefix = "  " * indent + ("%d. " % n)
+        prefix = "  " * indent + f"{n}. "
         self.set_x(self.l_margin)
         self.multi_cell(self._body_w(), 5, esc(strip_inline(prefix + text)))
 
@@ -297,11 +302,11 @@ def render(pdf, path):
     with open(path, encoding="utf-8") as f:
         lines = f.readlines()
 
-    in_code   = False
-    code_buf  = []
+    in_code = False
+    code_buf = []
     table_buf = []
-    in_table  = False
-    num_ctr   = 0
+    in_table = False
+    num_ctr = 0
 
     def flush_table():
         nonlocal table_buf, in_table
