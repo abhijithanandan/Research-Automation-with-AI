@@ -478,17 +478,28 @@ async def test_arxiv_429_with_retry_after_sleeps_before_reraise() -> None:
     async def _fake_sleep(d: float) -> None:
         captured_sleeps.append(d)
 
-    with respx.mock:
-        respx.get("https://export.arxiv.org/api/query").mock(
-            side_effect=[
-                httpx.Response(429, headers={"Retry-After": "3"}, text=""),
-                httpx.Response(200, text=ARXIV_ATOM_RESPONSE),
-            ]
-        )
-        adapter = ArXivAdapter()
-        async with httpx.AsyncClient() as client:
-            with _patch("app.services.discovery.asyncio.sleep", side_effect=_fake_sleep):
-                papers = await adapter.search("query", max_results=10, client=client)
+    # Other tests in this file monkey-patch _search_with_retry.retry.stop to
+    # short-circuit tenacity. That mutation is sticky on the class-level
+    # wrapper. Save and restore so this test runs deterministically regardless
+    # of order.
+    from tenacity import stop_after_attempt
+
+    original_stop = ArXivAdapter._search_with_retry.retry.stop  # type: ignore[attr-defined]
+    ArXivAdapter._search_with_retry.retry.stop = stop_after_attempt(3)  # type: ignore[attr-defined]
+    try:
+        with respx.mock:
+            respx.get("https://export.arxiv.org/api/query").mock(
+                side_effect=[
+                    httpx.Response(429, headers={"Retry-After": "3"}, text=""),
+                    httpx.Response(200, text=ARXIV_ATOM_RESPONSE),
+                ]
+            )
+            adapter = ArXivAdapter()
+            async with httpx.AsyncClient() as client:
+                with _patch("app.services.discovery.asyncio.sleep", side_effect=_fake_sleep):
+                    papers = await adapter.search("query", max_results=10, client=client)
+    finally:
+        ArXivAdapter._search_with_retry.retry.stop = original_stop  # type: ignore[attr-defined]
 
     assert len(papers) == 2
     # The Retry-After: 3 sleep must have fired (alongside any tenacity backoff,

@@ -417,12 +417,8 @@ async def test_workflow_approve_rate_limit_30_per_window() -> None:
 
     _reset_for_tests()
     for _ in range(30):
-        assert await _check(
-            "workflow.approve", "user-A", max_per_window=30, window_seconds=60.0
-        )
-    assert not await _check(
-        "workflow.approve", "user-A", max_per_window=30, window_seconds=60.0
-    )
+        assert await _check("workflow.approve", "user-A", max_per_window=30, window_seconds=60.0)
+    assert not await _check("workflow.approve", "user-A", max_per_window=30, window_seconds=60.0)
 
 
 @pytest.mark.asyncio
@@ -432,12 +428,8 @@ async def test_workflow_reject_rate_limit_30_per_window() -> None:
 
     _reset_for_tests()
     for _ in range(30):
-        assert await _check(
-            "workflow.reject", "user-A", max_per_window=30, window_seconds=60.0
-        )
-    assert not await _check(
-        "workflow.reject", "user-A", max_per_window=30, window_seconds=60.0
-    )
+        assert await _check("workflow.reject", "user-A", max_per_window=30, window_seconds=60.0)
+    assert not await _check("workflow.reject", "user-A", max_per_window=30, window_seconds=60.0)
 
 
 @pytest.mark.asyncio
@@ -448,12 +440,8 @@ async def test_workflow_override_rate_limit_20_per_window() -> None:
 
     _reset_for_tests()
     for _ in range(20):
-        assert await _check(
-            "workflow.override", "user-A", max_per_window=20, window_seconds=60.0
-        )
-    assert not await _check(
-        "workflow.override", "user-A", max_per_window=20, window_seconds=60.0
-    )
+        assert await _check("workflow.override", "user-A", max_per_window=20, window_seconds=60.0)
+    assert not await _check("workflow.override", "user-A", max_per_window=20, window_seconds=60.0)
 
 
 def test_workflow_routes_declare_rate_limit_dependencies() -> None:
