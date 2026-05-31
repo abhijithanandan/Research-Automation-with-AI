@@ -55,6 +55,26 @@ class Settings(BaseSettings):
     # no-op so we never send anonymous traffic to their service.
     unpaywall_email: str = ""
 
+    # Local-filesystem root for dataset storage (Phase 3 / FR-2.3). In prod
+    # the storage adapter switches to object storage. Files land under
+    # DATA_DIR/<project_id>/<dataset_id>/.
+    data_dir: str = "./data"
+    # Hard cap on a single dataset upload, in bytes. The HTTP body-size
+    # middleware drops larger requests before they hit the handler; this is
+    # a belt-and-braces guard inside the parser.
+    max_dataset_bytes: int = 50 * 1024 * 1024  # 50 MiB
+
+    # Phase 3 sandbox — Docker per-call (T2). Image must contain numpy,
+    # pandas, matplotlib, scipy, scikit-learn at minimum.
+    sandbox_image: str = "researchflow-analyst:0.2"
+    sandbox_timeout_s: int = 60
+    sandbox_memory_mb: int = 512
+    sandbox_cpus: float = 1.0
+    # When false the sandbox service refuses to run (defense-in-depth for
+    # staging hosts that haven't been hardened). Must be explicitly enabled
+    # in env to start executing user-generated code.
+    sandbox_enabled: bool = False
+
     default_token_cap_usd: float = 5.0
     max_paper_candidates: int = Field(default=30, ge=1, le=200)
     # Warn when this fraction of the per-project token cap is consumed (BRD §NFR-5).

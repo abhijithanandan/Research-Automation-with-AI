@@ -150,3 +150,15 @@ export interface CitationPanel {
   unresolved_keys: string[];
   resolved: ResolvedCitation[];
 }
+
+/** A user-uploaded tabular dataset (Phase 3 / FR-2.3, SPEC v0.3 §2.2). */
+export interface Dataset {
+  id: string;
+  project_id: string;
+  filename: string;
+  sha256: string;
+  columns: string[];
+  rowcount: number;
+  bytes: number;
+  uploaded_at: string;
+}

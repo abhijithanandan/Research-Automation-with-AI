@@ -104,6 +104,25 @@ class Artifact(BaseModel):
     created_at: datetime
 
 
+class Dataset(BaseModel):
+    """A user-uploaded tabular dataset, the input to the Analyst (Phase 3, FR-2.3).
+
+    SPEC v0.3 §2.2 addition. Stored under a per-project namespace on local
+    filesystem in dev (DATA_DIR/<project_id>/<dataset_id>/<filename>); object
+    storage in prod. The sha256 + (project_id, filename) tuple together prevent
+    a duplicate upload from silently shadowing the prior one.
+    """
+
+    id: UUID
+    project_id: UUID
+    filename: str
+    sha256: str
+    columns: list[str]
+    rowcount: int
+    bytes: int
+    uploaded_at: datetime
+
+
 class AuditLogEntry(BaseModel):
     id: UUID
     project_id: UUID
