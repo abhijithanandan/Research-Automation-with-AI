@@ -33,6 +33,17 @@ from app.utils.logging import get_logger
 
 _log = get_logger(__name__)
 
+
+class SourceUnavailableError(Exception):
+    """Raised when a discovery adapter's retry budget is exhausted (e.g. a
+    sustained 429 burst or timeout chain). The discovery router catches this
+    and counts it toward fail-fast `consecutive_failures` — previously the
+    adapter swallowed RetryError and returned [], which looked identical to
+    a legitimate zero-hit query and never tripped the short-circuit
+    (CodeRabbit follow-up to W2-S3/W3-Discovery).
+    """
+
+
 # Shared async client (re-used across adapter calls within a single request).
 _HTTP_TIMEOUT = httpx.Timeout(30.0)
 
@@ -161,9 +172,9 @@ class SemanticScholarAdapter:
         """
         try:
             return await self._search_with_retry(query, max_results, client)
-        except RetryError:
+        except RetryError as exc:
             _log.warning("semantic_scholar_retry_exhausted", query=query)
-            return []
+            raise SourceUnavailableError("semantic_scholar retry exhausted") from exc
 
     @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=1, max=8))
     async def _search_with_retry(
@@ -211,10 +222,27 @@ class SemanticScholarAdapter:
             # openAccessPdf / authors (e.g., null, list, scalar). Guarding
             # turns "TypeError mid-loop" into "skip this paper safely".
             raw_ext_ids = item.get("externalIds")
-            ext_ids: dict[str, str] = raw_ext_ids if isinstance(raw_ext_ids, dict) else {}
-            doi = ext_ids.get("DOI", "")
-            arxiv_id = ext_ids.get("ArXiv", "")
-            external_id = doi or arxiv_id or item.get("paperId", "")
+            ext_ids: dict[str, object] = raw_ext_ids if isinstance(raw_ext_ids, dict) else {}
+
+            # CodeRabbit follow-up: ext_ids VALUES may also be non-strings.
+            # SS docs say each is a string, but a malformed response could
+            # surface a list ("DOI": ["10.1/foo"]) or null. Accept a string
+            # as-is; for list/tuple take the first string element; otherwise
+            # treat as missing. Pydantic would have rejected a non-string
+            # external_id anyway — this just keeps more papers in the pool.
+            def _coerce_id(value: object) -> str:
+                if isinstance(value, str):
+                    return value
+                if isinstance(value, list | tuple) and value:
+                    first = value[0]
+                    return first if isinstance(first, str) else ""
+                return ""
+
+            doi = _coerce_id(ext_ids.get("DOI"))
+            arxiv_id = _coerce_id(ext_ids.get("ArXiv"))
+            paper_id_raw = item.get("paperId", "")
+            paper_id = paper_id_raw if isinstance(paper_id_raw, str) else ""
+            external_id = doi or arxiv_id or paper_id
             if not external_id:
                 continue
 
@@ -278,9 +306,9 @@ class ArXivAdapter:
         """Public entry point — wraps the retried inner call, returns [] on exhaustion."""
         try:
             return await self._search_with_retry(query, max_results, client, categories)
-        except RetryError:
+        except RetryError as exc:
             _log.warning("arxiv_retry_exhausted", query=query)
-            return []
+            raise SourceUnavailableError("arxiv retry exhausted") from exc
 
     @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=1, max=8))
     async def _search_with_retry(
@@ -421,9 +449,9 @@ class CrossrefAdapter:
         """
         try:
             return await self._search_with_retry(query, max_results, client)
-        except RetryError:
+        except RetryError as exc:
             _log.warning("crossref_retry_exhausted", query=query)
-            return []
+            raise SourceUnavailableError("crossref retry exhausted") from exc
 
     @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=1, max=8))
     async def _search_with_retry(
@@ -552,9 +580,9 @@ class CoreAdapter:
             return []
         try:
             return await self._search_with_retry(query, max_results, client)
-        except RetryError:
+        except RetryError as exc:
             _log.warning("core_retry_exhausted", query=query)
-            return []
+            raise SourceUnavailableError("core retry exhausted") from exc
 
     @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=1, max=8))
     async def _search_with_retry(
@@ -668,9 +696,9 @@ class EuropePMCAdapter:
         """Public entry point — wraps the retried inner call, returns [] on exhaustion."""
         try:
             return await self._search_with_retry(query, max_results, client)
-        except RetryError:
+        except RetryError as exc:
             _log.warning("europe_pmc_retry_exhausted", query=query)
-            return []
+            raise SourceUnavailableError("europe_pmc retry exhausted") from exc
 
     @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=1, max=8))
     async def _search_with_retry(

@@ -35,6 +35,7 @@ from app.services.discovery import (
     EuropePMCAdapter,
     SemanticScholarAdapter,
     SourceAdapter,
+    SourceUnavailableError,
 )
 from app.utils.logging import get_logger
 
@@ -141,6 +142,19 @@ class DiscoveryService:
                     )
                 else:
                     result = await adapter.search(query, max_per_source, client)
+            except SourceUnavailableError as exc:
+                # CodeRabbit: retry-exhausted is the case fail-fast was built
+                # for. Adapters now raise SourceUnavailableError instead of
+                # swallowing RetryError -> []; that path now reaches us as a
+                # real failure signal and bumps consecutive_failures.
+                _log.warning(
+                    "discovery_source_unavailable",
+                    source=type(adapter).__name__,
+                    query=query,
+                    error=str(exc),
+                )
+                result = []
+                failed = True
             except Exception as exc:  # one query must not sink the whole source
                 _log.warning(
                     "discovery_query_error",
