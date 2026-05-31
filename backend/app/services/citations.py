@@ -93,6 +93,17 @@ async def _approved_pool(db: AsyncSession, project_id: UUID) -> list[PaperRow]:
     )
 
 
+async def approved_citation_keys(db: AsyncSession, project_id: UUID) -> set[str]:
+    """The set of citation_keys currently in the project's approved pool.
+
+    Used by the override route (W1-A2) to reject `citation_corrections` whose
+    replacement keys aren't in the pool — defeats the prior integrity hole
+    where a reviewer could "fix" `[@hallucinated_a]` → `[@hallucinated_b]`
+    and the audit log would record a successful correction.
+    """
+    return {p.citation_key for p in await _approved_pool(db, project_id)}
+
+
 def apply_citation_corrections(content: str, corrections: dict[str, str]) -> str:
     """Replace `[@bad]` markers with `[@good]` per the corrections map (FR-1.5).
 

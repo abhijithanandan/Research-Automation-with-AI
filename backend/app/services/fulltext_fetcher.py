@@ -28,6 +28,7 @@ from __future__ import annotations
 import asyncio
 import io
 import re
+from collections.abc import Awaitable, Callable
 from uuid import UUID
 
 import httpx
@@ -53,8 +54,11 @@ _MIN_CHUNK_CHARS = 120
 _MAX_PDF_BYTES = 20 * 1024 * 1024  # 20 MB
 # Per-PDF download timeout. Slow OA mirrors do exist.
 _DOWNLOAD_TIMEOUT_S = 30.0
-# Spacing between PDF downloads from the same host so we stay polite.
-_PER_HOST_DELAY_S = 1.0
+# W2-C1: cap concurrent PDF downloads. 5 is below the politeness threshold
+# of every public OA mirror we touch (most allow ~10 concurrent), keeps the
+# host's connection pool small, and still parallelises ~30 papers down from
+# ~120s sequential to ~30s wall-clock.
+_CONCURRENT_DOWNLOADS = 5
 # User-Agent — honest identification (BRD FR-1.3 spirit: never headless without
 # consent → here we identify ourselves clearly on every request).
 _USER_AGENT = "ResearchFlowAI/0.1 (https://github.com/researchflow-ai)"
@@ -76,65 +80,114 @@ class FullTextFetcher:
     def __init__(self, vector_store: VectorStore) -> None:
         self._vs = vector_store
 
-    async def ingest(self, project_id: UUID, papers: list[Paper]) -> int:
+    async def ingest(
+        self,
+        project_id: UUID,
+        papers: list[Paper],
+        on_progress: Callable[[int, int], Awaitable[None]] | None = None,
+    ) -> int:
         """Download → parse → chunk → embed every fetchable paper.
 
         Returns the count of papers successfully ingested. Failures are logged
         as warnings and skipped — the Critic falls back to abstract-only
         extraction for papers we couldn't fetch (this is the same graceful-
         degradation contract as :class:`app.services.vector_store`).
+
+        W2-C1: downloads run concurrently under a Semaphore so a typical
+        ~30-paper pool ingests in ~30s instead of ~120s. ``on_progress`` (if
+        provided) is awaited after each paper's pipeline completes — workflow
+        callers pass a closure that emits a WS ``fulltext_progress`` event so
+        the frontend can show a "N/M papers indexed" chip during what used to
+        be a silent 2-minute wait.
         """
         if not papers:
             return 0
 
+        total = len(papers)
+        done = 0
         ingested = 0
+        # Lock guards the (done, ingested) counter increments + the
+        # on_progress dispatch so concurrent finishes can't race to emit
+        # progress events out of order.
+        progress_lock = asyncio.Lock()
+        sem = asyncio.Semaphore(_CONCURRENT_DOWNLOADS)
+
         async with httpx.AsyncClient(
             follow_redirects=True,
             timeout=httpx.Timeout(_DOWNLOAD_TIMEOUT_S),
             headers={"User-Agent": _USER_AGENT},
         ) as client:
-            for i, paper in enumerate(papers):
-                if i > 0:
-                    await asyncio.sleep(_PER_HOST_DELAY_S)
-                url = self._resolve_pdf_url(paper)
-                if url is None:
-                    _log.info(
-                        "fulltext_no_pdf_url",
-                        citation_key=paper.citation_key,
-                        source=paper.source,
-                    )
-                    continue
 
-                pdf_bytes = await self._download_pdf(client, url, paper.citation_key)
-                if pdf_bytes is None:
-                    continue
+            async def _run_one(paper: Paper) -> None:
+                nonlocal done, ingested
+                async with sem:
+                    ok = await self._ingest_one(client, project_id, paper)
+                async with progress_lock:
+                    done += 1
+                    if ok:
+                        ingested += 1
+                    if on_progress is not None:
+                        try:
+                            await on_progress(done, total)
+                        except Exception as exc:  # progress is observational
+                            _log.warning(
+                                "fulltext_progress_emit_failed",
+                                error_type=type(exc).__name__,
+                            )
 
-                text = await asyncio.to_thread(self._extract_text, pdf_bytes, paper.citation_key)
-                if not text:
-                    continue
-
-                chunks = self._chunk(text)
-                if not chunks:
-                    continue
-
-                try:
-                    await self._embed_chunks(project_id, paper.citation_key, chunks)
-                    ingested += 1
-                    _log.info(
-                        "fulltext_ingested",
-                        citation_key=paper.citation_key,
-                        chunks=len(chunks),
-                        chars=len(text),
-                    )
-                except VectorStoreUnavailableError as exc:
-                    # If the vector store is down we just stop — the Critic
-                    # has its own VectorStoreUnavailable handling.
-                    _log.warning(
-                        "fulltext_embed_failed", error_type=type(exc).__name__, error=str(exc)
-                    )
-                    return ingested
+            # return_exceptions=True so a single failing task can't bubble up
+            # and abort the gather — _ingest_one already converts any per-paper
+            # failure into a returned False + warning log.
+            await asyncio.gather(*(_run_one(p) for p in papers), return_exceptions=True)
 
         return ingested
+
+    async def _ingest_one(
+        self,
+        client: httpx.AsyncClient,
+        project_id: UUID,
+        paper: Paper,
+    ) -> bool:
+        """Pipeline for one paper. Returns True if a chunk made it into the
+        vector store. Any failure is logged and returns False — the caller
+        treats False as "this paper didn't ingest, move on."
+        """
+        url = self._resolve_pdf_url(paper)
+        if url is None:
+            _log.info(
+                "fulltext_no_pdf_url",
+                citation_key=paper.citation_key,
+                source=paper.source,
+            )
+            return False
+
+        pdf_bytes = await self._download_pdf(client, url, paper.citation_key)
+        if pdf_bytes is None:
+            return False
+
+        text = await asyncio.to_thread(self._extract_text, pdf_bytes, paper.citation_key)
+        if not text:
+            return False
+
+        chunks = self._chunk(text)
+        if not chunks:
+            return False
+
+        try:
+            await self._embed_chunks(project_id, paper.citation_key, chunks)
+            _log.info(
+                "fulltext_ingested",
+                citation_key=paper.citation_key,
+                chunks=len(chunks),
+                chars=len(text),
+            )
+            return True
+        except VectorStoreUnavailableError as exc:
+            _log.warning("fulltext_embed_failed", error_type=type(exc).__name__, error=str(exc))
+            # Note: the caller's gather() will see this as a False return; the
+            # caller doesn't currently propagate this to a hard stop, which
+            # matches the prior contract (best-effort ingest, Critic falls back).
+            return False
 
     # ------------------------------------------------------------------
     # Internals
@@ -251,11 +304,20 @@ class FullTextFetcher:
             )
             return ""
         pages: list[str] = []
-        for page in reader.pages:
+        for page_idx, page in enumerate(reader.pages):
             try:
                 pages.append(page.extract_text() or "")
-            except Exception:
-                # Some malformed pages throw inside pypdf — skip them.
+            except Exception as exc:
+                # Wave-3/A3: log the exception class so a real recurring
+                # pypdf bug is visible in ops logs. Per-page graceful
+                # degradation contract is intentional — one malformed page
+                # never sinks the whole PDF.
+                _log.debug(
+                    "fulltext_page_extract_failed",
+                    citation_key=citation_key,
+                    page=page_idx,
+                    error_type=type(exc).__name__,
+                )
                 continue
         # Re-join pages with a paragraph break so the chunker sees natural
         # section boundaries.

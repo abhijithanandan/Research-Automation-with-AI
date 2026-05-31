@@ -286,3 +286,189 @@ def _make_test_app():
             from app.main import create_app
 
             return create_app()
+
+
+@pytest.mark.asyncio
+async def test_override_rejects_corrections_to_unknown_keys(
+    db_session: AsyncSession,
+) -> None:
+    """W1-A2: citation_corrections target keys MUST be in the approved pool.
+
+    Reviewer cannot "fix" `[@hallucinated_a]` → `[@hallucinated_b]` and have
+    the audit log lie about a successful correction. Replacement keys outside
+    the pool fail with 422 invalid_citation_correction.
+    """
+    from unittest.mock import patch as _patch
+
+    from httpx import ASGITransport, AsyncClient
+
+    from app.api import deps
+    from app.models.db import PaperRow
+    from app.models.schemas import User, WorkflowRun
+
+    # Seed an approved pool containing exactly one valid key.
+    db_session.add(
+        PaperRow(
+            id=uuid4(),
+            project_id=TEST_PROJECT_ID,
+            source="arxiv",
+            external_id="arxiv:lecun2015",
+            title="Deep Learning",
+            authors=["LeCun, Y"],
+            year=2015,
+            citation_key="lecun2015",
+            approved=True,
+            added_at=datetime.now(tz=UTC),
+        )
+    )
+    await db_session.commit()
+
+    app = _make_test_app()
+    test_user = User(
+        id=TEST_USER_ID,
+        email="b4@example.com",
+        created_at=datetime.now(tz=UTC),
+    )
+
+    async def _get_test_user() -> User:
+        return test_user
+
+    async def _get_test_session() -> AsyncIterator[AsyncSession]:
+        yield db_session
+
+    app.dependency_overrides[deps.get_current_user] = _get_test_user
+    app.dependency_overrides[deps.get_db_session] = _get_test_session
+
+    active_run = WorkflowRun(
+        id=TEST_RUN_ID,
+        project_id=TEST_PROJECT_ID,
+        phase=Phase.DRAFTING,
+        state="awaiting_approval",
+        checkpoint_id="ckpt",
+        started_at=datetime.now(tz=UTC),
+        last_event_at=datetime.now(tz=UTC),
+    )
+
+    # We never reach override_workflow — the 422 fires first. Still mock it
+    # so a regression that bypasses the validation is caught by an extra
+    # "should not be called" assertion below.
+    with _patch("app.services.workflow.override_workflow", new_callable=AsyncMock) as mock_ov:
+        with _patch("app.api.routes.workflow._assert_project_owned", new_callable=AsyncMock):
+            with _patch(
+                "app.api.routes.workflow.wf_svc.get_active_run",
+                new_callable=AsyncMock,
+                return_value=active_run,
+            ):
+                transport = ASGITransport(app=app)
+                async with AsyncClient(transport=transport, base_url="http://test") as client:
+                    resp = await client.post(
+                        f"/api/v1/projects/{TEST_PROJECT_ID}/workflow/override",
+                        json={
+                            "artifact_kind": "section",
+                            "label": "introduction",
+                            "content": "Intro [@bad_key]",
+                            "mime_type": "text/markdown",
+                            "citation_corrections": {"bad_key": "ghost2099"},
+                            "override_reason": "test bad correction",
+                        },
+                        headers={"Authorization": "Bearer test-token"},
+                    )
+
+    assert resp.status_code == 422
+    body = resp.json()
+    detail = body["detail"]
+    assert detail["code"] == "invalid_citation_correction"
+    assert detail["bad_replacements"] == ["ghost2099"]
+    mock_ov.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_override_accepts_corrections_to_approved_keys(
+    db_session: AsyncSession,
+) -> None:
+    """W1-A2 happy path: when every replacement key IS in the approved pool,
+    the override proceeds and the correction is applied + audited."""
+    from unittest.mock import patch as _patch
+
+    from httpx import ASGITransport, AsyncClient
+
+    from app.api import deps
+    from app.models.db import PaperRow
+    from app.models.schemas import User, WorkflowRun
+
+    db_session.add(
+        PaperRow(
+            id=uuid4(),
+            project_id=TEST_PROJECT_ID,
+            source="arxiv",
+            external_id="arxiv:lecun2015",
+            title="Deep Learning",
+            authors=["LeCun, Y"],
+            year=2015,
+            citation_key="lecun2015",
+            approved=True,
+            added_at=datetime.now(tz=UTC),
+        )
+    )
+    await db_session.commit()
+
+    app = _make_test_app()
+    test_user = User(id=TEST_USER_ID, email="b4@example.com", created_at=datetime.now(tz=UTC))
+
+    async def _get_test_user() -> User:
+        return test_user
+
+    async def _get_test_session() -> AsyncIterator[AsyncSession]:
+        yield db_session
+
+    app.dependency_overrides[deps.get_current_user] = _get_test_user
+    app.dependency_overrides[deps.get_db_session] = _get_test_session
+
+    active_run = WorkflowRun(
+        id=TEST_RUN_ID,
+        project_id=TEST_PROJECT_ID,
+        phase=Phase.DRAFTING,
+        state="awaiting_approval",
+        checkpoint_id="ckpt",
+        started_at=datetime.now(tz=UTC),
+        last_event_at=datetime.now(tz=UTC),
+    )
+    mock_return = WorkflowRun(
+        id=TEST_RUN_ID,
+        project_id=TEST_PROJECT_ID,
+        phase=Phase.DRAFTING,
+        state="approved",
+        checkpoint_id="ckpt",
+        started_at=datetime.now(tz=UTC),
+        last_event_at=datetime.now(tz=UTC),
+    )
+
+    with _patch("app.services.workflow.override_workflow", new_callable=AsyncMock) as mock_ov:
+        mock_ov.return_value = mock_return
+        with _patch("app.api.routes.workflow._assert_project_owned", new_callable=AsyncMock):
+            with _patch(
+                "app.api.routes.workflow.wf_svc.get_active_run",
+                new_callable=AsyncMock,
+                return_value=active_run,
+            ):
+                transport = ASGITransport(app=app)
+                async with AsyncClient(transport=transport, base_url="http://test") as client:
+                    resp = await client.post(
+                        f"/api/v1/projects/{TEST_PROJECT_ID}/workflow/override",
+                        json={
+                            "artifact_kind": "section",
+                            "label": "introduction",
+                            "content": "Intro [@bad_key]",
+                            "mime_type": "text/markdown",
+                            "citation_corrections": {"bad_key": "lecun2015"},
+                            "override_reason": "remap bad key to valid pool key",
+                        },
+                        headers={"Authorization": "Bearer test-token"},
+                    )
+
+    assert resp.status_code == 200
+    mock_ov.assert_called_once()
+    # The corrected content was passed through to override_workflow.
+    call_kwargs = mock_ov.call_args.kwargs
+    assert "[@lecun2015]" in call_kwargs["content"]
+    assert "[@bad_key]" not in call_kwargs["content"]

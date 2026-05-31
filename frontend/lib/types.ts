@@ -86,6 +86,8 @@ export interface Paper {
   abstract?: string | null;
   pdf_url?: string | null;
   citation_key: string;
+  /** Wave-3/C3: optional because not all routes carry it on the wire. */
+  citation_count?: number | null;
   approved: boolean;
   added_at: string;
 }

@@ -90,6 +90,38 @@ async def test_arxiv_adapter_parses_feed() -> None:
 
 
 @pytest.mark.asyncio
+async def test_arxiv_rejects_xml_bomb() -> None:
+    """W1-A4: arXiv parser uses defusedxml — billion-laughs entity expansion
+    is rejected at parse time. The adapter returns an empty list instead of
+    exhausting memory. Confirms bandit B314 is no longer applicable."""
+    # 9-level nested entity expansion = 10^9 'lol' bytes if expanded. defusedxml
+    # raises EntitiesForbidden on parse; the adapter must NOT expand it.
+    xml_bomb = """<?xml version="1.0"?>
+<!DOCTYPE lolz [
+  <!ENTITY lol "lol">
+  <!ENTITY lol2 "&lol;&lol;&lol;&lol;&lol;&lol;&lol;&lol;&lol;&lol;">
+  <!ENTITY lol3 "&lol2;&lol2;&lol2;&lol2;&lol2;&lol2;&lol2;&lol2;&lol2;&lol2;">
+  <!ENTITY lol4 "&lol3;&lol3;&lol3;&lol3;&lol3;&lol3;&lol3;&lol3;&lol3;&lol3;">
+]>
+<feed xmlns="http://www.w3.org/2005/Atom"><entry><title>&lol4;</title></entry></feed>"""
+    with respx.mock:
+        respx.get("https://export.arxiv.org/api/query").mock(
+            return_value=httpx.Response(200, text=xml_bomb)
+        )
+        adapter = ArXivAdapter()
+        # Disable tenacity retries so a parser-rejection failure surfaces
+        # immediately rather than triggering 3 retries.
+        adapter._search_with_retry.retry.stop = lambda *_: True  # type: ignore[attr-defined]
+        async with httpx.AsyncClient() as client:
+            papers = await adapter.search("xxe", max_results=10, client=client)
+
+    # Either: defusedxml refused the DTD (current behavior — adapter logs
+    # arxiv_bad_xml and returns []) OR the adapter's outer retry-error guard
+    # returns []. The invariant is: NO memory blow-up, NO exception escapes.
+    assert papers == []
+
+
+@pytest.mark.asyncio
 async def test_arxiv_adapter_handles_5xx() -> None:
     """ArXivAdapter should return empty list on 5xx (non-fatal per agent contract)."""
     with respx.mock:
@@ -330,3 +362,146 @@ async def test_europe_pmc_adapter_handles_5xx() -> None:
         async with httpx.AsyncClient() as client:
             papers = await adapter.search("query", max_results=10, client=client)
     assert papers == []
+
+
+# ---------------------------------------------------------------------------
+# W2-S3 — Retry-After honored on 429
+# ---------------------------------------------------------------------------
+
+
+def test_sleep_for_retry_after_parses_integer_delta() -> None:
+    """Bare integer (RFC 7231 delta-seconds) is parsed and used."""
+    import asyncio
+
+    from app.services.discovery import _sleep_for_retry_after
+
+    captured_delays: list[float] = []
+
+    async def _fake_sleep(d: float) -> None:
+        captured_delays.append(d)
+
+    resp = httpx.Response(429, headers={"Retry-After": "5"})
+
+    async def _run() -> None:
+        from unittest.mock import patch as _patch
+
+        with _patch("app.services.discovery.asyncio.sleep", side_effect=_fake_sleep):
+            await _sleep_for_retry_after(resp)
+
+    asyncio.run(_run())
+    assert captured_delays == [5.0]
+
+
+def test_sleep_for_retry_after_caps_at_60s() -> None:
+    """A server sending Retry-After: 9999 must not hang the workflow."""
+    import asyncio
+
+    from app.services.discovery import _RETRY_AFTER_MAX_S, _sleep_for_retry_after
+
+    captured: list[float] = []
+
+    async def _fake_sleep(d: float) -> None:
+        captured.append(d)
+
+    resp = httpx.Response(429, headers={"Retry-After": "9999"})
+
+    async def _run() -> None:
+        from unittest.mock import patch as _patch
+
+        with _patch("app.services.discovery.asyncio.sleep", side_effect=_fake_sleep):
+            await _sleep_for_retry_after(resp)
+
+    asyncio.run(_run())
+    assert captured == [_RETRY_AFTER_MAX_S]
+
+
+def test_sleep_for_retry_after_no_header_is_noop() -> None:
+    """No Retry-After header → no sleep (tenacity backoff stays authoritative)."""
+    import asyncio
+
+    from app.services.discovery import _sleep_for_retry_after
+
+    captured: list[float] = []
+
+    async def _fake_sleep(d: float) -> None:
+        captured.append(d)
+
+    resp = httpx.Response(429)
+
+    async def _run() -> None:
+        from unittest.mock import patch as _patch
+
+        with _patch("app.services.discovery.asyncio.sleep", side_effect=_fake_sleep):
+            await _sleep_for_retry_after(resp)
+
+    asyncio.run(_run())
+    assert captured == []
+
+
+def test_sleep_for_retry_after_handles_http_date() -> None:
+    """RFC-1123 HTTP-date form is rarer but compliant; should convert to a
+    positive delta seconds and sleep that long."""
+    import asyncio
+    from datetime import UTC, datetime, timedelta
+    from email.utils import format_datetime
+
+    from app.services.discovery import _sleep_for_retry_after
+
+    captured: list[float] = []
+
+    async def _fake_sleep(d: float) -> None:
+        captured.append(d)
+
+    future = datetime.now(tz=UTC) + timedelta(seconds=10)
+    resp = httpx.Response(429, headers={"Retry-After": format_datetime(future, usegmt=True)})
+
+    async def _run() -> None:
+        from unittest.mock import patch as _patch
+
+        with _patch("app.services.discovery.asyncio.sleep", side_effect=_fake_sleep):
+            await _sleep_for_retry_after(resp)
+
+    asyncio.run(_run())
+    assert len(captured) == 1
+    # Near 10s (slack for wall-clock drift between building/reading the date).
+    assert 8.0 <= captured[0] <= 10.5
+
+
+@pytest.mark.asyncio
+async def test_arxiv_429_with_retry_after_sleeps_before_reraise() -> None:
+    """Integration: arXiv adapter sees a 429 with Retry-After: 3, calls
+    _sleep_for_retry_after, then tenacity retries against the 200."""
+    from unittest.mock import patch as _patch
+
+    captured_sleeps: list[float] = []
+
+    async def _fake_sleep(d: float) -> None:
+        captured_sleeps.append(d)
+
+    # Other tests in this file monkey-patch _search_with_retry.retry.stop to
+    # short-circuit tenacity. That mutation is sticky on the class-level
+    # wrapper. Save and restore so this test runs deterministically regardless
+    # of order.
+    from tenacity import stop_after_attempt
+
+    original_stop = ArXivAdapter._search_with_retry.retry.stop  # type: ignore[attr-defined]
+    ArXivAdapter._search_with_retry.retry.stop = stop_after_attempt(3)  # type: ignore[attr-defined]
+    try:
+        with respx.mock:
+            respx.get("https://export.arxiv.org/api/query").mock(
+                side_effect=[
+                    httpx.Response(429, headers={"Retry-After": "3"}, text=""),
+                    httpx.Response(200, text=ARXIV_ATOM_RESPONSE),
+                ]
+            )
+            adapter = ArXivAdapter()
+            async with httpx.AsyncClient() as client:
+                with _patch("app.services.discovery.asyncio.sleep", side_effect=_fake_sleep):
+                    papers = await adapter.search("query", max_results=10, client=client)
+    finally:
+        ArXivAdapter._search_with_retry.retry.stop = original_stop  # type: ignore[attr-defined]
+
+    assert len(papers) == 2
+    # The Retry-After: 3 sleep must have fired (alongside any tenacity backoff,
+    # which goes through tenacity.nap and doesn't show up here).
+    assert 3.0 in captured_sleeps

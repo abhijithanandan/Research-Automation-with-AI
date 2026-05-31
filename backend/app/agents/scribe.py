@@ -25,6 +25,7 @@ from uuid import UUID, uuid4
 
 from pydantic import BaseModel, Field
 
+from app.agents._prompt_safety import SYSTEM_ANCHOR, safe_tag, xml_escape
 from app.agents.base import Agent
 from app.models.schemas import Artifact, Paper, SectionName
 from app.services.llm import LLMGateway, get_llm_gateway
@@ -174,7 +175,7 @@ keys, do not use DOIs or URLs in the body:
 Approved-pool abstracts (for grounding):
 {pool_block}
 {rag_block}{prior_block}{feedback_block}
-Output Markdown only. Begin with a `## {section_title}` heading."""
+Output Markdown only. Begin with a `## {section_title}` heading.{system_anchor}"""
 
 
 _CITATION_RE = re.compile(r"\[@([A-Za-z0-9_\-:.]+)\]")
@@ -395,31 +396,57 @@ class Scribe(Agent[ScribeInput, ScribeOutput]):
             pool_size=pool_size,
             telemetry_block=_format_telemetry_block(payload.workflow_telemetry, pool_size),
         )
+        # W1-A1: every untrusted string is wrapped in an XML tag with HTML
+        # entities escaped, so a crafted abstract or feedback message cannot
+        # break out and override the system instructions above.
         pool_block = "\n".join(
-            f"[@{p.citation_key}] {p.title} — {p.abstract or '(no abstract)'}"
+            f"[@{p.citation_key}] "
+            + safe_tag(
+                "paper",
+                # raw=True: the body here is already-built safe_tag output,
+                # do not re-escape its angle brackets.
+                f"{safe_tag('title', p.title)} {safe_tag('abstract', p.abstract or '(no abstract)')}",
+                attrs={"id": p.citation_key},
+                raw=True,
+            )
             for p in payload.approved_pool
         )
-        rag_block = f"\nRetrieved passages:\n{rag_context}\n" if rag_context else ""
+        rag_block = (
+            f"\nRetrieved passages:\n{safe_tag('rag', rag_context)}\n" if rag_context else ""
+        )
         prior_block = ""
         if payload.prior_sections:
             prior_block = (
                 "\nPreviously approved sections (read-only context):\n"
-                + "\n".join(f"### {a.label}\n{a.content[:1200]}" for a in payload.prior_sections)
+                + "\n".join(
+                    safe_tag(
+                        "prior_section",
+                        a.content[:1200],
+                        attrs={"label": a.label},
+                    )
+                    for a in payload.prior_sections
+                )
                 + "\n"
             )
         feedback_block = ""
         external_feedback = (feedback or payload.feedback or "").strip()
         if external_feedback:
-            feedback_block = f"\nRevision instruction: {external_feedback}\n"
+            feedback_block = (
+                f"\nRevision instruction: {safe_tag('reviewer_feedback', external_feedback)}\n"
+            )
         return _PROMPT_TEMPLATE.format(
             anti_cosplay=anti_cosplay,
             section_prefix=section_prefix,
-            approved_keys=", ".join(f"`{k}`" for k in approved_keys),
+            # Citation keys are pool-controlled (sourced from PaperRow that
+            # the Librarian generated); still escape defensively in case a
+            # future Librarian change loosens the generator.
+            approved_keys=", ".join(f"`{xml_escape(k)}`" for k in approved_keys),
             pool_block=pool_block,
             rag_block=rag_block,
             prior_block=prior_block,
             feedback_block=feedback_block,
             section_title=payload.section.replace("_", " ").title(),
+            system_anchor=SYSTEM_ANCHOR,
         )
 
     @staticmethod

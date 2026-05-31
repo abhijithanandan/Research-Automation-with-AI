@@ -6,7 +6,7 @@ from typing import Literal
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, status
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from app.api.deps import CurrentUser, DbSession
 from app.api.rate_limit import rate_limit
@@ -47,8 +47,17 @@ class ApprovePayload(BaseModel):
     feedback: str | None = Field(default=None, max_length=_MAX_FEEDBACK_CHARS)
     # Approve despite unresolved citation keys (default: block). Additive.
     force_unresolved: bool = False
-    # Required-in-spirit when force_unresolved is set: why the bypass is OK.
+    # When force_unresolved is True this MUST be non-empty (W2-S1) — the
+    # frontend already disables the button on empty input, but the server
+    # also enforces so a curl call can't bypass it and leave the audit log
+    # with empty-reason forced approvals.
     override_reason: str | None = Field(default=None, max_length=_MAX_FEEDBACK_CHARS)
+
+    @model_validator(mode="after")
+    def _require_reason_on_force(self) -> ApprovePayload:
+        if self.force_unresolved and not (self.override_reason or "").strip():
+            raise ValueError("override_reason is required (non-empty) when force_unresolved=true")
+        return self
 
 
 class OverridePayload(BaseModel):
@@ -88,7 +97,15 @@ async def get_workflow(project_id: UUID, user: CurrentUser, db: DbSession) -> Wo
     return wf_svc._run_to_schema(run)
 
 
-@router.post("/approve", response_model=WorkflowRun)
+@router.post(
+    "/approve",
+    response_model=WorkflowRun,
+    # W2-S2: cap per-user approve spam — even a successful approve writes
+    # audit rows and triggers a graph resume. 30/min is well above any
+    # human reviewer cadence (one approve every 2s sustained) but stops
+    # a runaway client.
+    dependencies=[Depends(rate_limit("workflow.approve", max_per_window=30))],
+)
 async def approve(
     project_id: UUID, payload: ApprovePayload, user: CurrentUser, db: DbSession
 ) -> WorkflowRun:
@@ -139,7 +156,13 @@ async def approve(
     )
 
 
-@router.post("/reject", response_model=WorkflowRun)
+@router.post(
+    "/reject",
+    response_model=WorkflowRun,
+    # W2-S2: same posture as approve. Reject triggers an agent regenerate
+    # (LLM call → tokens, money). 30/min/user.
+    dependencies=[Depends(rate_limit("workflow.reject", max_per_window=30))],
+)
 async def reject(
     project_id: UUID, payload: FeedbackPayload, user: CurrentUser, db: DbSession
 ) -> WorkflowRun:
@@ -157,7 +180,14 @@ async def reject(
     return await wf_svc.reject_workflow(db, project_id, run.id, user.id, feedback)
 
 
-@router.post("/override", response_model=WorkflowRun)
+@router.post(
+    "/override",
+    response_model=WorkflowRun,
+    # W2-S2: override writes up to 256 KB into ArtifactRow + 1 audit row.
+    # 20/min is the tightest of the three (DB write blast radius is the
+    # largest of the gate endpoints).
+    dependencies=[Depends(rate_limit("workflow.override", max_per_window=20))],
+)
 async def override(
     project_id: UUID, payload: OverridePayload, user: CurrentUser, db: DbSession
 ) -> WorkflowRun:
@@ -178,9 +208,28 @@ async def override(
 
     # FR-1.5 citation correction: replace any malformed `[@bad]` markers with the
     # reviewer-chosen valid `[@good]` keys, then record the human edit for audit.
+    # W1-A2: replacement keys MUST be in the approved pool — otherwise we'd
+    # rewrite one hallucinated key to another and lie about it in the audit log.
     content = payload.content
     if payload.citation_corrections:
-        from app.services.citations import apply_citation_corrections
+        from app.services.citations import (
+            apply_citation_corrections,
+            approved_citation_keys,
+        )
+
+        approved = await approved_citation_keys(db, project_id)
+        replacements = set(payload.citation_corrections.values())
+        bad_replacements = sorted(replacements - approved)
+        if bad_replacements:
+            raise HTTPException(
+                # FastAPI deprecated _ENTITY in favor of _CONTENT; same 422.
+                status.HTTP_422_UNPROCESSABLE_CONTENT,
+                detail={
+                    "code": "invalid_citation_correction",
+                    "message": ("citation_corrections target keys must be in the approved pool"),
+                    "bad_replacements": bad_replacements,
+                },
+            )
 
         content = apply_citation_corrections(content, payload.citation_corrections)
         await wf_svc.record_citation_correction(

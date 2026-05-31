@@ -65,7 +65,10 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         from app.models.schemas import VALID_RUN_STATES
 
         orphan_state = "error"
-        assert orphan_state in VALID_RUN_STATES  # guard the literal at write time
+        # Wave-3/W1: raise instead of assert — `-O` strips asserts and we don't
+        # want this contract guard silently disappearing under PYTHONOPTIMIZE.
+        if orphan_state not in VALID_RUN_STATES:
+            raise RuntimeError(f"orphan-cleanup state {orphan_state!r} not in VALID_RUN_STATES")
         try:
             async with get_session() as session:
                 await session.execute(

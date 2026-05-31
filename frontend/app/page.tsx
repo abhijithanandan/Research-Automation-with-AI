@@ -194,7 +194,16 @@ export default function HomePage() {
   >(null);
   // Bump whenever a section_ready event lands so the telemetry chips refetch.
   const [telemetryRefresh, setTelemetryRefresh] = useState(0);
+  // W2-C1: fulltext PDF ingest progress (between Phase-1 approve and the
+  // Critic starting). null = idle, otherwise {done,total} for the busy chip.
+  const [fulltextProgress, setFulltextProgress] = useState<
+    { done: number; total: number } | null
+  >(null);
   const wsRef = useRef<ManagedSocket | null>(null);
+  // Wave-3/W2: dedupe duplicate approval.required events. Each section gate
+  // can land twice (live emit + replay from the WS bus's last_event cache);
+  // without this guard we double-fetch artifacts on every reconnect.
+  const lastDraftingFetchRef = useRef<{ projectId: string; section: string } | null>(null);
 
   useEffect(() => {
     logEndRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -230,8 +239,20 @@ export default function HomePage() {
           // the section name; fetch the latest section artifact (most recent
           // by created_at — the one the Scribe just produced).
           setCurrentSection(evt.section ?? null);
-          setSectionLoading(true);
           setView("drafting");
+
+          // Wave-3/W2: dedupe — if the same (project, section) just arrived,
+          // we already have the artifact loaded; skip the redundant fetch +
+          // telemetry refresh. WS replay + reconnect can each re-deliver the
+          // last approval.required event.
+          const sectionKey = evt.section ?? "";
+          const last = lastDraftingFetchRef.current;
+          if (last && last.projectId === projectId && last.section === sectionKey) {
+            break;
+          }
+          lastDraftingFetchRef.current = { projectId, section: sectionKey };
+
+          setSectionLoading(true);
           // Each section gate means a fresh phase_4.section_ready audit row
           // on the backend — bump the telemetry chips so they refetch /usage
           // and the counters track live work.
@@ -250,6 +271,9 @@ export default function HomePage() {
           // paper pool so the matrix can show titles (not just citation keys).
           setSynthesisLoading(true);
           setView("synthesis");
+          // W2-C1: fulltext ingest is finished by now (the Critic just
+          // synthesized). Clear the progress chip.
+          setFulltextProgress(null);
           Promise.all([
             api.artifacts.list(projectId, "matrix", DEV_TOKEN),
             api.artifacts.list(projectId, "summary", DEV_TOKEN),
@@ -333,6 +357,13 @@ export default function HomePage() {
         });
         setView("error");
         break;
+      case "fulltext_progress":
+        // W2-C1: the Critic's fulltext fetcher reports per-paper completion.
+        // We just track latest done/total; the busy-view chip reads this slot.
+        // Clear automatically when the run advances past synthesis (handled
+        // by approval.required for phase=synthesis, below).
+        setFulltextProgress({ done: evt.done, total: evt.total });
+        break;
     }
   }, []);
 
@@ -376,70 +407,82 @@ export default function HomePage() {
     }
   }
 
-  async function handleApprove(opts?: {
-    force_unresolved?: boolean;
-    override_reason?: string | null;
-  }) {
-    if (!ctx) return;
-    setView("busy");
-    try {
-      await api.workflow.approve(
-        ctx.projectId,
-        {
-          feedback: null,
-          ...(opts?.force_unresolved ? { force_unresolved: true } : {}),
-          ...(opts?.override_reason ? { override_reason: opts.override_reason } : {}),
-        },
-        DEV_TOKEN,
-      );
-    } catch (err) {
-      // Re-throw the typed ApiError so the SectionReview can branch on a 409
-      // unresolved_citations response (FR-1.5) without flipping to the error
-      // view. Other callers still let it fall through to setError.
-      if (err instanceof ApiError && err.code === "unresolved_citations") {
-        setView("drafting");
-        throw err;
+  // Wave-3/C5: stable references so future React.memo'd children don't see
+  // a new function each render. Each closes over `ctx` only — recompute when
+  // the project changes.
+  const handleApprove = useCallback(
+    async (opts?: { force_unresolved?: boolean; override_reason?: string | null }) => {
+      if (!ctx) return;
+      setView("busy");
+      try {
+        await api.workflow.approve(
+          ctx.projectId,
+          {
+            feedback: null,
+            ...(opts?.force_unresolved ? { force_unresolved: true } : {}),
+            ...(opts?.override_reason ? { override_reason: opts.override_reason } : {}),
+          },
+          DEV_TOKEN,
+        );
+      } catch (err) {
+        // Re-throw the typed ApiError so the SectionReview can branch on a 409
+        // unresolved_citations response (FR-1.5) without flipping to the error
+        // view. Other callers still let it fall through to setError.
+        if (err instanceof ApiError && err.code === "unresolved_citations") {
+          setView("drafting");
+          throw err;
+        }
+        setError(describeError(err, "Approve failed."));
+        setView("error");
       }
-      setError(describeError(err, "Approve failed."));
-      setView("error");
-    }
-  }
+    },
+    [ctx],
+  );
 
-  async function handleReject(feedback: string) {
-    if (!ctx) return;
-    setView("busy");
-    try {
-      await api.workflow.reject(ctx.projectId, feedback, DEV_TOKEN);
-      setView("running");
-      setLogLines((l) => [...l, "↩  Rejected — Librarian regenerating…"]);
-    } catch (err) {
-      setError(describeError(err, "Reject failed."));
-      setView("error");
-    }
-  }
+  const handleReject = useCallback(
+    async (feedback: string) => {
+      if (!ctx) return;
+      setView("busy");
+      try {
+        await api.workflow.reject(ctx.projectId, feedback, DEV_TOKEN);
+        setView("running");
+        setLogLines((l) => [...l, "↩  Rejected — Librarian regenerating…"]);
+      } catch (err) {
+        setError(describeError(err, "Reject failed."));
+        setView("error");
+      }
+    },
+    [ctx],
+  );
 
-  async function handleOverride(payload: OverridePayload | SynthesisOverridePayload) {
-    if (!ctx) return;
-    setView("busy");
-    try {
-      await api.workflow.override(ctx.projectId, payload, DEV_TOKEN);
-    } catch (err) {
-      setError(describeError(err, "Override failed."));
-      setView("error");
-    }
-  }
+  const handleOverride = useCallback(
+    async (payload: OverridePayload | SynthesisOverridePayload) => {
+      if (!ctx) return;
+      setView("busy");
+      try {
+        await api.workflow.override(ctx.projectId, payload, DEV_TOKEN);
+      } catch (err) {
+        setError(describeError(err, "Override failed."));
+        setView("error");
+      }
+    },
+    [ctx],
+  );
 
-  async function handleSynthesisReject(feedback: string) {
-    if (!ctx) return;
-    setView("busy");
-    try {
-      await api.workflow.reject(ctx.projectId, feedback, DEV_TOKEN);
-      setLogLines((l) => [...l, "↩  Rejected — Critic regenerating synthesis…"]);
-    } catch (err) {
-      setError(describeError(err, "Reject failed."));
-      setView("error");
-    }
-  }
+  const handleSynthesisReject = useCallback(
+    async (feedback: string) => {
+      if (!ctx) return;
+      setView("busy");
+      try {
+        await api.workflow.reject(ctx.projectId, feedback, DEV_TOKEN);
+        setLogLines((l) => [...l, "↩  Rejected — Critic regenerating synthesis…"]);
+      } catch (err) {
+        setError(describeError(err, "Reject failed."));
+        setView("error");
+      }
+    },
+    [ctx],
+  );
 
   async function handleTogglePaper(paper: Paper) {
     if (!ctx) return;
@@ -584,6 +627,26 @@ export default function HomePage() {
                 <span className="h-3.5 w-3.5 animate-spin rounded-full border-2 border-border border-t-primary" />
                 {view === "busy" ? "Waiting for the workflow to advance…" : "Librarian is fetching papers…"}
               </div>
+
+              {/* W2-C1: live fulltext-ingest progress while the Critic prepares
+                  RAG context (used to be a silent ~120s gap). */}
+              {fulltextProgress && fulltextProgress.total > 0 && (
+                <div className="flex items-center gap-2 font-mono text-[11px] uppercase tracking-[0.12em] text-muted">
+                  <span>fulltext indexed</span>
+                  <span className="text-primary">
+                    {fulltextProgress.done}/{fulltextProgress.total} papers
+                  </span>
+                  <div className="h-1 flex-1 max-w-xs overflow-hidden rounded-full bg-surface-elevated">
+                    <div
+                      className="h-full rounded-full bg-primary transition-all duration-300"
+                      style={{
+                        width: `${Math.min(100, (fulltextProgress.done / fulltextProgress.total) * 100)}%`,
+                      }}
+                    />
+                  </div>
+                </div>
+              )}
+
               <AgentLog lines={logLines} endRef={logEndRef} />
             </div>
           )}
@@ -840,6 +903,10 @@ export default function HomePage() {
                     setPapers([]); setTitle(""); setSeedQuery("");
                     setMatrix(null); setSummary(null); setCompletedPhase(null);
                     setSectionArtifact(null); setCurrentSection(null); setManuscript(null);
+                    // Wave-3/W2: reset the dedupe marker so a fresh project
+                    // never inherits the previous project's section key.
+                    lastDraftingFetchRef.current = null;
+                    setFulltextProgress(null);
                     wsRef.current?.close();
                   }}
                   className="inline-flex items-center rounded-md px-4 py-2 text-sm font-semibold text-primary transition-all duration-200 hover:bg-primary/10"

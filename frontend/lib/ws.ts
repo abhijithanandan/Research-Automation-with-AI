@@ -40,6 +40,16 @@ export type ServerEvent =
       spend_usd: number;
       cap_usd: number;
     }
+  | {
+      // W2-C1: emitted once per paper as the fulltext fetcher concurrently
+      // downloads & embeds PDFs between Phase-1 approval and Critic start.
+      // Frontend renders a "N/M papers indexed" chip during the otherwise-
+      // silent busy gap.
+      type: "fulltext_progress";
+      ts: string;
+      done: number;
+      total: number;
+    }
   | { type: "pong"; ts: string };
 
 export interface WSOptions {
