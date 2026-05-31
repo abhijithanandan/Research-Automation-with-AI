@@ -1,17 +1,17 @@
 {
   "errors": [],
-  "generated_at": "2026-05-30T21:01:03Z",
+  "generated_at": "2026-05-31T11:56:13Z",
   "metrics": {
     "_totals": {
-      "CONFIDENCE.HIGH": 5,
+      "CONFIDENCE.HIGH": 0,
       "CONFIDENCE.LOW": 0,
       "CONFIDENCE.MEDIUM": 0,
       "CONFIDENCE.UNDEFINED": 0,
       "SEVERITY.HIGH": 0,
-      "SEVERITY.LOW": 5,
+      "SEVERITY.LOW": 0,
       "SEVERITY.MEDIUM": 0,
       "SEVERITY.UNDEFINED": 0,
-      "loc": 6310,
+      "loc": 6430,
       "nosec": 0,
       "skipped_tests": 0
     },
@@ -94,15 +94,15 @@
       "skipped_tests": 0
     },
     "app\\agents\\librarian.py": {
-      "CONFIDENCE.HIGH": 1,
+      "CONFIDENCE.HIGH": 0,
       "CONFIDENCE.LOW": 0,
       "CONFIDENCE.MEDIUM": 0,
       "CONFIDENCE.UNDEFINED": 0,
       "SEVERITY.HIGH": 0,
-      "SEVERITY.LOW": 1,
+      "SEVERITY.LOW": 0,
       "SEVERITY.MEDIUM": 0,
       "SEVERITY.UNDEFINED": 0,
-      "loc": 204,
+      "loc": 207,
       "nosec": 0,
       "skipped_tests": 0
     },
@@ -258,7 +258,7 @@
       "SEVERITY.LOW": 0,
       "SEVERITY.MEDIUM": 0,
       "SEVERITY.UNDEFINED": 0,
-      "loc": 170,
+      "loc": 187,
       "nosec": 0,
       "skipped_tests": 0
     },
@@ -336,20 +336,20 @@
       "SEVERITY.LOW": 0,
       "SEVERITY.MEDIUM": 0,
       "SEVERITY.UNDEFINED": 0,
-      "loc": 640,
+      "loc": 648,
       "nosec": 0,
       "skipped_tests": 0
     },
     "app\\main.py": {
-      "CONFIDENCE.HIGH": 1,
+      "CONFIDENCE.HIGH": 0,
       "CONFIDENCE.LOW": 0,
       "CONFIDENCE.MEDIUM": 0,
       "CONFIDENCE.UNDEFINED": 0,
       "SEVERITY.HIGH": 0,
-      "SEVERITY.LOW": 1,
+      "SEVERITY.LOW": 0,
       "SEVERITY.MEDIUM": 0,
       "SEVERITY.UNDEFINED": 0,
-      "loc": 114,
+      "loc": 115,
       "nosec": 0,
       "skipped_tests": 0
     },
@@ -440,7 +440,7 @@
       "SEVERITY.LOW": 0,
       "SEVERITY.MEDIUM": 0,
       "SEVERITY.UNDEFINED": 0,
-      "loc": 568,
+      "loc": 613,
       "nosec": 0,
       "skipped_tests": 0
     },
@@ -471,15 +471,15 @@
       "skipped_tests": 0
     },
     "app\\services\\fulltext_fetcher.py": {
-      "CONFIDENCE.HIGH": 1,
+      "CONFIDENCE.HIGH": 0,
       "CONFIDENCE.LOW": 0,
       "CONFIDENCE.MEDIUM": 0,
       "CONFIDENCE.UNDEFINED": 0,
       "SEVERITY.HIGH": 0,
-      "SEVERITY.LOW": 1,
+      "SEVERITY.LOW": 0,
       "SEVERITY.MEDIUM": 0,
       "SEVERITY.UNDEFINED": 0,
-      "loc": 234,
+      "loc": 278,
       "nosec": 0,
       "skipped_tests": 0
     },
@@ -523,15 +523,15 @@
       "skipped_tests": 0
     },
     "app\\services\\workflow.py": {
-      "CONFIDENCE.HIGH": 2,
+      "CONFIDENCE.HIGH": 0,
       "CONFIDENCE.LOW": 0,
       "CONFIDENCE.MEDIUM": 0,
       "CONFIDENCE.UNDEFINED": 0,
       "SEVERITY.HIGH": 0,
-      "SEVERITY.LOW": 2,
+      "SEVERITY.LOW": 0,
       "SEVERITY.MEDIUM": 0,
       "SEVERITY.UNDEFINED": 0,
-      "loc": 1116,
+      "loc": 1118,
       "nosec": 0,
       "skipped_tests": 0
     },
@@ -562,108 +562,5 @@
       "skipped_tests": 0
     }
   },
-  "results": [
-    {
-      "code": "110         # Invariant: every returned paper has approved=False (SPEC \u00a76.1).\n111         assert all(not p.approved for p in trimmed)\n112 \n",
-      "col_offset": 8,
-      "end_col_offset": 51,
-      "filename": "app\\agents\\librarian.py",
-      "issue_confidence": "HIGH",
-      "issue_cwe": {
-        "id": 703,
-        "link": "https://cwe.mitre.org/data/definitions/703.html"
-      },
-      "issue_severity": "LOW",
-      "issue_text": "Use of assert detected. The enclosed code will be removed when compiling to optimised byte code.",
-      "line_number": 111,
-      "line_range": [
-        111
-      ],
-      "more_info": "https://bandit.readthedocs.io/en/1.9.4/plugins/b101_assert_used.html",
-      "test_id": "B101",
-      "test_name": "assert_used"
-    },
-    {
-      "code": "67         orphan_state = \"error\"\n68         assert orphan_state in VALID_RUN_STATES  # guard the literal at write time\n69         try:\n",
-      "col_offset": 8,
-      "end_col_offset": 47,
-      "filename": "app\\main.py",
-      "issue_confidence": "HIGH",
-      "issue_cwe": {
-        "id": 703,
-        "link": "https://cwe.mitre.org/data/definitions/703.html"
-      },
-      "issue_severity": "LOW",
-      "issue_text": "Use of assert detected. The enclosed code will be removed when compiling to optimised byte code.",
-      "line_number": 68,
-      "line_range": [
-        68
-      ],
-      "more_info": "https://bandit.readthedocs.io/en/1.9.4/plugins/b101_assert_used.html",
-      "test_id": "B101",
-      "test_name": "assert_used"
-    },
-    {
-      "code": "256                 pages.append(page.extract_text() or \"\")\n257             except Exception:\n258                 # Some malformed pages throw inside pypdf \u2014 skip them.\n259                 continue\n260         # Re-join pages with a paragraph break so the chunker sees natural\n",
-      "col_offset": 12,
-      "end_col_offset": 24,
-      "filename": "app\\services\\fulltext_fetcher.py",
-      "issue_confidence": "HIGH",
-      "issue_cwe": {
-        "id": 703,
-        "link": "https://cwe.mitre.org/data/definitions/703.html"
-      },
-      "issue_severity": "LOW",
-      "issue_text": "Try, Except, Continue detected.",
-      "line_number": 257,
-      "line_range": [
-        257,
-        258,
-        259
-      ],
-      "more_info": "https://bandit.readthedocs.io/en/1.9.4/plugins/b112_try_except_continue.html",
-      "test_id": "B112",
-      "test_name": "try_except_continue"
-    },
-    {
-      "code": "880     refreshed = await session.get(WorkflowRunRow, run_id)\n881     assert refreshed is not None  # _assert_awaiting already verified existence\n882     return _run_to_schema(refreshed)\n",
-      "col_offset": 4,
-      "end_col_offset": 32,
-      "filename": "app\\services\\workflow.py",
-      "issue_confidence": "HIGH",
-      "issue_cwe": {
-        "id": 703,
-        "link": "https://cwe.mitre.org/data/definitions/703.html"
-      },
-      "issue_severity": "LOW",
-      "issue_text": "Use of assert detected. The enclosed code will be removed when compiling to optimised byte code.",
-      "line_number": 881,
-      "line_range": [
-        881
-      ],
-      "more_info": "https://bandit.readthedocs.io/en/1.9.4/plugins/b101_assert_used.html",
-      "test_id": "B101",
-      "test_name": "assert_used"
-    },
-    {
-      "code": "971     refreshed = await session.get(WorkflowRunRow, run_id)\n972     assert refreshed is not None  # _assert_awaiting already verified existence\n973     return _run_to_schema(refreshed)\n",
-      "col_offset": 4,
-      "end_col_offset": 32,
-      "filename": "app\\services\\workflow.py",
-      "issue_confidence": "HIGH",
-      "issue_cwe": {
-        "id": 703,
-        "link": "https://cwe.mitre.org/data/definitions/703.html"
-      },
-      "issue_severity": "LOW",
-      "issue_text": "Use of assert detected. The enclosed code will be removed when compiling to optimised byte code.",
-      "line_number": 972,
-      "line_range": [
-        972
-      ],
-      "more_info": "https://bandit.readthedocs.io/en/1.9.4/plugins/b101_assert_used.html",
-      "test_id": "B101",
-      "test_name": "assert_used"
-    }
-  ]
+  "results": []
 }

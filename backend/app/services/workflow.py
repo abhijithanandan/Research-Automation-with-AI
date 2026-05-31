@@ -878,7 +878,9 @@ async def approve_workflow(
     # Return the freshly updated run state. Re-read so we surface the new
     # state/phase the route just committed.
     refreshed = await session.get(WorkflowRunRow, run_id)
-    assert refreshed is not None  # _assert_awaiting already verified existence
+    # Wave-3/W1: explicit check instead of assert (asserts strip under `-O`).
+    if refreshed is None:
+        raise RuntimeError(f"WorkflowRun {run_id} disappeared between _assert_awaiting and re-read")
     return _run_to_schema(refreshed)
 
 
@@ -969,7 +971,9 @@ async def override_workflow(
     task.add_done_callback(_background_tasks.discard)
 
     refreshed = await session.get(WorkflowRunRow, run_id)
-    assert refreshed is not None  # _assert_awaiting already verified existence
+    # Wave-3/W1: explicit check instead of assert.
+    if refreshed is None:
+        raise RuntimeError(f"WorkflowRun {run_id} disappeared between _assert_awaiting and re-read")
     return _run_to_schema(refreshed)
 
 

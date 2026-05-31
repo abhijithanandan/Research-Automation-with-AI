@@ -8,6 +8,7 @@ import type {
   Paper,
   Project,
   UsageRollup,
+  WorkflowRun,
 } from "./types";
 
 const BASE_URL =
@@ -200,7 +201,7 @@ export const api = {
 
   workflow: {
     start: (projectId: string, token: string) =>
-      request<unknown>(`/projects/${projectId}/workflow/start`, {
+      request<WorkflowRun>(`/projects/${projectId}/workflow/start`, {
         method: "POST",
         token,
       }),
@@ -214,14 +215,14 @@ export const api = {
       },
       token: string,
     ) =>
-      request<unknown>(`/projects/${projectId}/workflow/approve`, {
+      request<WorkflowRun>(`/projects/${projectId}/workflow/approve`, {
         method: "POST",
         body: JSON.stringify(body),
         token,
       }),
 
     reject: (projectId: string, feedback: string, token: string) =>
-      request<unknown>(`/projects/${projectId}/workflow/reject`, {
+      request<WorkflowRun>(`/projects/${projectId}/workflow/reject`, {
         method: "POST",
         body: JSON.stringify({ feedback }),
         token,
@@ -239,7 +240,7 @@ export const api = {
       },
       token: string,
     ) =>
-      request<unknown>(`/projects/${projectId}/workflow/override`, {
+      request<WorkflowRun>(`/projects/${projectId}/workflow/override`, {
         method: "POST",
         body: JSON.stringify(body),
         token,

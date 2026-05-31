@@ -304,11 +304,20 @@ class FullTextFetcher:
             )
             return ""
         pages: list[str] = []
-        for page in reader.pages:
+        for page_idx, page in enumerate(reader.pages):
             try:
                 pages.append(page.extract_text() or "")
-            except Exception:
-                # Some malformed pages throw inside pypdf — skip them.
+            except Exception as exc:
+                # Wave-3/A3: log the exception class so a real recurring
+                # pypdf bug is visible in ops logs. Per-page graceful
+                # degradation contract is intentional — one malformed page
+                # never sinks the whole PDF.
+                _log.debug(
+                    "fulltext_page_extract_failed",
+                    citation_key=citation_key,
+                    page=page_idx,
+                    error_type=type(exc).__name__,
+                )
                 continue
         # Re-join pages with a paragraph break so the chunker sees natural
         # section boundaries.

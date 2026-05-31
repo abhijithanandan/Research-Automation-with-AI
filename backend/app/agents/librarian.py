@@ -108,7 +108,12 @@ class Librarian(Agent[LibrarianInput, LibrarianOutput]):
         trimmed = generate_citation_keys(trimmed)
 
         # Invariant: every returned paper has approved=False (SPEC §6.1).
-        assert all(not p.approved for p in trimmed)
+        # Wave-3/W1: raise instead of assert so PYTHONOPTIMIZE=1 cannot strip
+        # the guard.
+        if any(p.approved for p in trimmed):
+            raise RuntimeError(
+                "Librarian produced an approved paper — SPEC §6.1 invariant violation"
+            )
 
         _log.info("librarian_done", candidate_count=len(trimmed))
         return LibrarianOutput(
