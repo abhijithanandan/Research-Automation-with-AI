@@ -164,11 +164,15 @@ class SemanticScholarAdapter:
         return {}
 
     async def search(self, query: str, max_results: int, client: httpx.AsyncClient) -> list[Paper]:
-        """Public entry point — wraps the retried inner call, returns [] on exhaustion.
+        """Public entry point — wraps the retried inner call.
 
-        Without an API key Semantic Scholar throttles aggressively (HTTP 429). If
-        all retries are exhausted we degrade to an empty list rather than letting
-        the RetryError drop the whole discovery run — arXiv / Crossref still apply.
+        Without an API key Semantic Scholar throttles aggressively (HTTP 429).
+        On retry exhaustion we log ``semantic_scholar_retry_exhausted`` and
+        raise :class:`SourceUnavailableError` (chained from tenacity's
+        ``RetryError``). The discovery router catches it and counts it toward
+        fail-fast ``consecutive_failures``; other adapters continue
+        independently. CodeRabbit follow-up — previously returned ``[]``,
+        which was indistinguishable from a legitimate zero-hit query.
         """
         try:
             return await self._search_with_retry(query, max_results, client)
@@ -303,7 +307,12 @@ class ArXivAdapter:
         client: httpx.AsyncClient,
         categories: list[str] | None = None,
     ) -> list[Paper]:
-        """Public entry point — wraps the retried inner call, returns [] on exhaustion."""
+        """Public entry point — wraps the retried inner call.
+
+        On retry exhaustion logs ``arxiv_retry_exhausted`` and raises
+        :class:`SourceUnavailableError` (chained from tenacity's ``RetryError``)
+        so the discovery router can count it toward fail-fast.
+        """
         try:
             return await self._search_with_retry(query, max_results, client, categories)
         except RetryError as exc:
@@ -441,11 +450,12 @@ class CrossrefAdapter:
         return {"User-Agent": ua}
 
     async def search(self, query: str, max_results: int, client: httpx.AsyncClient) -> list[Paper]:
-        """Public entry — wraps the retried inner call, returns [] on exhaustion.
+        """Public entry — wraps the retried inner call.
 
-        Mirrors the Semantic Scholar / arXiv / CORE / Europe PMC pattern so a
-        RetryError doesn't bubble up to the discovery router and kill the whole
-        run (coderabbit PR #5 finding).
+        On retry exhaustion logs ``crossref_retry_exhausted`` and raises
+        :class:`SourceUnavailableError` (chained from tenacity's ``RetryError``)
+        so the discovery router can count it toward fail-fast. Mirrors the
+        Semantic Scholar / arXiv / CORE / Europe PMC pattern.
         """
         try:
             return await self._search_with_retry(query, max_results, client)
@@ -491,6 +501,11 @@ class CrossrefAdapter:
         papers: list[Paper] = []
         now = datetime.now(tz=UTC)
         for item in items:
+            # CodeRabbit: guard against non-dict elements (mirrors SS+CORE
+            # adapters). A malformed Crossref response with a non-dict entry
+            # would otherwise AttributeError on .get and crash this query lane.
+            if not isinstance(item, dict):
+                continue
             doi = item.get("DOI", "")
             if not doi:
                 continue
@@ -693,7 +708,11 @@ class EuropePMCAdapter:
         }
 
     async def search(self, query: str, max_results: int, client: httpx.AsyncClient) -> list[Paper]:
-        """Public entry point — wraps the retried inner call, returns [] on exhaustion."""
+        """Public entry point — wraps the retried inner call.
+
+        On retry exhaustion logs ``europe_pmc_retry_exhausted`` and raises
+        :class:`SourceUnavailableError` (chained from tenacity's ``RetryError``).
+        """
         try:
             return await self._search_with_retry(query, max_results, client)
         except RetryError as exc:
@@ -738,6 +757,11 @@ class EuropePMCAdapter:
         papers: list[Paper] = []
         now = datetime.now(tz=UTC)
         for item in items:
+            # CodeRabbit: guard against non-dict elements (mirrors SS+CORE
+            # adapters). Defends DOI/PMID/PMCID extraction against malformed
+            # Europe PMC payloads.
+            if not isinstance(item, dict):
+                continue
             doi = (item.get("doi") or "").strip()
             pmid = (item.get("pmid") or "").strip()
             pmcid = (item.get("pmcid") or "").strip()
