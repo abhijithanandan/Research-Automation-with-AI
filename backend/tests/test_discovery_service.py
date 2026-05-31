@@ -104,6 +104,15 @@ async def test_arxiv_rejects_xml_bomb() -> None:
   <!ENTITY lol4 "&lol3;&lol3;&lol3;&lol3;&lol3;&lol3;&lol3;&lol3;&lol3;&lol3;">
 ]>
 <feed xmlns="http://www.w3.org/2005/Atom"><entry><title>&lol4;</title></entry></feed>"""
+    # CodeRabbit follow-up: adapters now raise SourceUnavailableError on retry
+    # exhaustion (the router catches it and counts it as a failure). The
+    # invariant under test here is "NO memory blow-up, NO crash from the
+    # XML-bomb itself" — defusedxml refusing the DTD inside _safe_fromstring
+    # causes the adapter to log arxiv_bad_xml and return []; if tenacity
+    # exhausts (depends on test wiring), the adapter raises SourceUnavailableError.
+    # Both outcomes are acceptable here: the bomb did not expand.
+    from app.services.discovery import SourceUnavailableError
+
     with respx.mock:
         respx.get("https://export.arxiv.org/api/query").mock(
             return_value=httpx.Response(200, text=xml_bomb)
@@ -113,26 +122,31 @@ async def test_arxiv_rejects_xml_bomb() -> None:
         # immediately rather than triggering 3 retries.
         adapter._search_with_retry.retry.stop = lambda *_: True  # type: ignore[attr-defined]
         async with httpx.AsyncClient() as client:
-            papers = await adapter.search("xxe", max_results=10, client=client)
-
-    # Either: defusedxml refused the DTD (current behavior — adapter logs
-    # arxiv_bad_xml and returns []) OR the adapter's outer retry-error guard
-    # returns []. The invariant is: NO memory blow-up, NO exception escapes.
+            try:
+                papers = await adapter.search("xxe", max_results=10, client=client)
+            except SourceUnavailableError:
+                papers = []  # retry-exhausted is the alternate acceptable outcome
     assert papers == []
 
 
 @pytest.mark.asyncio
 async def test_arxiv_adapter_handles_5xx() -> None:
-    """ArXivAdapter should return empty list on 5xx (non-fatal per agent contract)."""
+    """ArXivAdapter should raise SourceUnavailableError on retry-exhausted 5xx
+    (CodeRabbit follow-up). The discovery router catches this and counts it
+    toward the fail-fast `consecutive_failures`. Previously the adapter
+    swallowed RetryError -> [] and the router could not distinguish it from
+    a legitimate zero-hit query."""
+    import pytest as _pytest
+
+    from app.services.discovery import SourceUnavailableError
+
     with respx.mock:
         respx.get("https://export.arxiv.org/api/query").mock(return_value=httpx.Response(503))
         adapter = ArXivAdapter()
-        # Disable tenacity retries for the test to keep it fast.
         adapter._search_with_retry.retry.stop = lambda *_: True  # type: ignore[attr-defined]
         async with httpx.AsyncClient() as client:
-            papers = await adapter.search("query", max_results=10, client=client)
-
-    assert papers == []
+            with _pytest.raises(SourceUnavailableError):
+                await adapter.search("query", max_results=10, client=client)
 
 
 @pytest.mark.asyncio
@@ -155,18 +169,22 @@ async def test_semantic_scholar_adapter_parses_response() -> None:
 
 @pytest.mark.asyncio
 async def test_semantic_scholar_adapter_handles_429_exhaustion() -> None:
-    """A persistent 429 must degrade to [] (so arXiv/Crossref still apply)."""
+    """A persistent 429 must raise SourceUnavailableError (CodeRabbit follow-up).
+    The discovery router catches it and counts it toward fail-fast; the
+    surviving sources (arXiv/Crossref/...) still run their queries."""
+    import pytest as _pytest
+
+    from app.services.discovery import SourceUnavailableError
+
     with respx.mock:
         respx.get("https://api.semanticscholar.org/graph/v1/paper/search").mock(
             return_value=httpx.Response(429)
         )
         adapter = SemanticScholarAdapter()
-        # Disable tenacity retries to keep the test fast.
         adapter._search_with_retry.retry.stop = lambda *_: True  # type: ignore[attr-defined]
         async with httpx.AsyncClient() as client:
-            papers = await adapter.search("query", max_results=10, client=client)
-
-    assert papers == []
+            with _pytest.raises(SourceUnavailableError):
+                await adapter.search("query", max_results=10, client=client)
 
 
 @pytest.mark.asyncio
@@ -351,17 +369,21 @@ async def test_semantic_scholar_strips_dead_ieee_ielx_pdf_urls() -> None:
 
 @pytest.mark.asyncio
 async def test_europe_pmc_adapter_handles_5xx() -> None:
-    """A 5xx must degrade to [] after retries are exhausted."""
+    """A 5xx after retries exhausted must raise SourceUnavailableError
+    (CodeRabbit follow-up). The router converts that to fail-fast bookkeeping."""
+    import pytest as _pytest
+
+    from app.services.discovery import SourceUnavailableError
+
     with respx.mock:
         respx.get("https://www.ebi.ac.uk/europepmc/webservices/rest/search").mock(
             return_value=httpx.Response(503)
         )
         adapter = EuropePMCAdapter()
-        # Disable tenacity retries to keep the test fast.
         adapter._search_with_retry.retry.stop = lambda *_: True  # type: ignore[attr-defined]
         async with httpx.AsyncClient() as client:
-            papers = await adapter.search("query", max_results=10, client=client)
-    assert papers == []
+            with _pytest.raises(SourceUnavailableError):
+                await adapter.search("query", max_results=10, client=client)
 
 
 # ---------------------------------------------------------------------------
