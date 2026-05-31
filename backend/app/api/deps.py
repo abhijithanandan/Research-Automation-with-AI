@@ -46,7 +46,16 @@ async def get_current_user(
             headers={"WWW-Authenticate": "Bearer"},
         )
 
-    token = authorization[7:]  # strip "Bearer "
+    token = authorization[7:].strip()  # strip "Bearer " prefix + any padding
+    # CodeRabbit: reject "Bearer " (empty token) BEFORE any verification or
+    # DEV_AUTH_BYPASS branch so an empty header never produces an empty
+    # firebase_uid.
+    if not token:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Missing or malformed Authorization header",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
 
     try:
         claims = await verify_firebase_token(token)

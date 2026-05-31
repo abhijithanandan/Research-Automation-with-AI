@@ -1,10 +1,13 @@
 #!/usr/bin/env sh
 # Pre-commit hook — runs lint-staged on the files you've staged.
 # Failures here mean your commit is rejected; fix the reported issues and re-stage.
+set -e
 
 # M1-E: secret scan — fail the commit if a staged file matches an API-key
 # pattern. Runs first so the more expensive lint-staged step is skipped on
-# a guaranteed-fail commit.
+# a guaranteed-fail commit. `set -e` ensures a non-zero exit from the script
+# aborts the hook before lint-staged runs (prior to this the secret scan
+# would log but not block — CodeRabbit caught the missing fail-fast).
 ./scripts/check_secrets.sh
 
 npx --no-install lint-staged

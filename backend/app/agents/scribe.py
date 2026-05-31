@@ -356,10 +356,21 @@ class Scribe(Agent[ScribeInput, ScribeOutput]):
 
     @staticmethod
     def _resolve_project_id(papers: list[Paper]) -> UUID:
+        """Pick the (single) project_id from a non-empty approved pool.
+
+        Every Paper persisted to the DB carries a non-null project_id (the
+        Librarian stamps it before _persist_candidates). If the pool is
+        somehow empty of stamped papers, generating a random uuid4() would
+        silently route Chroma chunks into a namespace nobody owns. Raise
+        loudly instead so the caller (graph node) surfaces a real error.
+        """
         for p in papers:
             if p.project_id is not None:
                 return p.project_id
-        return uuid4()
+        raise ValueError(
+            "Scribe._resolve_project_id: approved_pool has no Paper with project_id; "
+            "every persisted paper must carry a project_id (Librarian invariant)"
+        )
 
     async def _fetch_rag_context(self, project_id: UUID, payload: ScribeInput) -> str:
         """Best-effort RAG. A vector-store outage is non-fatal — Scribe falls

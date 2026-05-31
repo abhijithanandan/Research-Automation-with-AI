@@ -572,6 +572,10 @@ async def _run_graph(
         )
         async with get_session() as bg_session:
             await _update_run_state(bg_session, run_id, "error")
+        # CodeRabbit: don't leak raw exception text to clients — log it
+        # server-side (exc_info=True above) and send only the typed
+        # error_code + a generic message. error_code is enough for the UI
+        # to branch on (e.g., "RateLimitError" -> retry banner).
         await _emit(
             project_id,
             {
@@ -579,7 +583,7 @@ async def _run_graph(
                 "agent": "librarian",
                 "run_id": str(run_id),
                 "error_code": error_code,
-                "error": str(exc),
+                "error": "An internal error occurred while running the librarian.",
             },
         )
 
@@ -1246,7 +1250,10 @@ async def _resume_graph(
                 "agent": "system",
                 "run_id": str(run_id),
                 "error_code": error_code,
-                "error": str(exc),
+                # CodeRabbit: same posture as the librarian path — typed
+                # error_code only, generic client-safe message; original
+                # exception logged server-side via exc_info=True.
+                "error": "An internal error occurred while resuming the workflow.",
             },
         )
 

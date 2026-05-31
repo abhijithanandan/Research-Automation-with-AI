@@ -151,7 +151,11 @@ async def test_approved_papers_always_start_unapproved() -> None:
             )
         )
 
-        with patch("app.services.llm.get_llm_gateway") as mock_gw:
+        # CodeRabbit: patch the symbol the LIBRARIAN module imported, not the
+        # one in services.llm. `from X import Y` creates a fresh binding in
+        # the importing module — patching the source module doesn't redirect
+        # the binding the consumer already captured.
+        with patch("app.agents.librarian.get_llm_gateway") as mock_gw:
             mock_gw.return_value.complete = AsyncMock(return_value=('["alt query"]', {}))
 
             librarian = Librarian()

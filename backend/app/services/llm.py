@@ -186,6 +186,10 @@ class AnthropicProvider:
         text_out = "".join(parts)
 
         # Capture exact token counts for the gateway's telemetry.
+        # CodeRabbit: reset BEFORE inspecting so a missing usage field can't
+        # leave the previous call's counts in self.last_usage. Stale token
+        # counts feed straight into the cost-cap rollup (NFR-5) and skew it.
+        self.last_usage = None
         usage = getattr(response, "usage", None)
         if usage is not None:
             self.last_usage = (

@@ -86,8 +86,7 @@ their citation_key. Do not invent papers.
 {feedback_block}{focus_block}Per-paper extractions (JSON):
 {extractions_json}
 
-Write the narrative synthesis in Markdown.
-"""
+Write the narrative synthesis in Markdown.{system_anchor}"""
 
 
 class PaperExtraction(BaseModel):
@@ -521,15 +520,22 @@ class Critic(Agent[CriticInput, CriticOutput]):
         usage: CriticUsage,
     ) -> str:
         """Generate the narrative summary from the per-paper extractions."""
+        # W1-A1 follow-up: feedback and focus are untrusted reviewer input —
+        # wrap them in <reviewer_feedback> / <focus> tags so a crafted note
+        # can't override the system instructions above. The SYSTEM_ANCHOR at
+        # the END of the prompt template reinforces the boundary.
         feedback_block = (
-            f"Apply the following revision instruction: {feedback}\n\n" if feedback else ""
+            f"Apply the following revision instruction: {safe_tag('reviewer_feedback', feedback)}\n\n"
+            if feedback
+            else ""
         )
-        focus_block = f"Focus the synthesis on: {focus}\n\n" if focus else ""
+        focus_block = f"Focus the synthesis on: {safe_tag('focus', focus)}\n\n" if focus else ""
         extractions_json = json.dumps([r.model_dump() for r in rows], indent=2)
         prompt = _SYNTHESIS_PROMPT_TEMPLATE.format(
             feedback_block=feedback_block,
             focus_block=focus_block,
             extractions_json=extractions_json,
+            system_anchor=SYSTEM_ANCHOR,
         )
         try:
             text, telemetry = await self._llm.complete(prompt)

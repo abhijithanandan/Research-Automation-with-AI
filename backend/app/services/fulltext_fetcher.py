@@ -29,6 +29,7 @@ import asyncio
 import io
 import re
 from collections.abc import Awaitable, Callable
+from urllib.parse import urlparse
 from uuid import UUID
 
 import httpx
@@ -39,6 +40,59 @@ from app.services.vector_store import VectorStore, VectorStoreUnavailableError
 from app.utils.logging import get_logger
 
 _log = get_logger(__name__)
+
+# CodeRabbit / OA-host allow-list (W3-Auth follow-up): substring matching of
+# "arxiv.org" in url is unsafe — https://evil.com/?fake=arxiv.org passes.
+# Match on urlparse(...).netloc with strict suffix rules instead, and disable
+# httpx follow_redirects so a redirect can't escape the allow-list. Each
+# (host, [optional path-prefix]) pair below names one trusted OA mirror.
+_OA_HOSTS_ALLOWLIST: tuple[tuple[str, str | None], ...] = (
+    ("arxiv.org", "/"),
+    ("www.arxiv.org", "/"),
+    ("export.arxiv.org", "/"),
+    ("semanticscholar.org", "/"),
+    ("www.semanticscholar.org", "/"),
+    ("aclanthology.org", "/"),
+    ("www.aclanthology.org", "/"),
+    ("biorxiv.org", "/"),
+    ("www.biorxiv.org", "/"),
+    ("medrxiv.org", "/"),
+    ("www.medrxiv.org", "/"),
+    ("plos.org", "/"),
+    ("journals.plos.org", "/"),
+    # OA Nature articles only — restrict by path.
+    ("nature.com", "/articles"),
+    ("www.nature.com", "/articles"),
+    ("frontiersin.org", "/"),
+    ("www.frontiersin.org", "/"),
+    ("mdpi.com", "/"),
+    ("www.mdpi.com", "/"),
+    ("openreview.net", "/"),
+    # PubMed Central — only the PMC archive prefix.
+    ("ncbi.nlm.nih.gov", "/pmc"),
+    ("www.ncbi.nlm.nih.gov", "/pmc"),
+)
+
+
+def _is_allowed_pdf_url(url: str) -> bool:
+    """Return True iff `url` matches the OA allow-list under strict host+path
+    rules. Rejects javascript:/file:/ftp:/data:, IP literals, IDN punycode
+    spoofs (we just compare netloc as-is — caller normalises if needed)."""
+    try:
+        parsed = urlparse(url)
+    except ValueError:
+        return False
+    if parsed.scheme not in ("http", "https"):
+        return False
+    host = (parsed.hostname or "").lower()
+    if not host:
+        return False
+    path = parsed.path or "/"
+    for allowed_host, path_prefix in _OA_HOSTS_ALLOWLIST:
+        if host == allowed_host and (path_prefix is None or path.startswith(path_prefix)):
+            return True
+    return False
+
 
 # ---------------------------------------------------------------------------
 # Tunables
@@ -113,27 +167,48 @@ class FullTextFetcher:
         sem = asyncio.Semaphore(_CONCURRENT_DOWNLOADS)
 
         async with httpx.AsyncClient(
-            follow_redirects=True,
+            # CodeRabbit / W3-Auth: do NOT follow redirects automatically —
+            # a permissive 3xx Location could escape the OA allow-list.
+            # _download_pdf walks the redirect chain manually and revalidates
+            # each hop against _is_allowed_pdf_url.
+            follow_redirects=False,
             timeout=httpx.Timeout(_DOWNLOAD_TIMEOUT_S),
             headers={"User-Agent": _USER_AGENT},
         ) as client:
 
             async def _run_one(paper: Paper) -> None:
+                # CodeRabbit: progress must NEVER stall even if _ingest_one
+                # raises an unexpected exception. Wrap the per-paper call in
+                # try/except so the finally block always increments done/
+                # ingested and emits the progress event. asyncio.gather is
+                # called with return_exceptions=True too, but a raise here
+                # would short-circuit BEFORE the finally — explicit finally
+                # is what guarantees the counter advances.
                 nonlocal done, ingested
-                async with sem:
-                    ok = await self._ingest_one(client, project_id, paper)
-                async with progress_lock:
-                    done += 1
-                    if ok:
-                        ingested += 1
-                    if on_progress is not None:
-                        try:
-                            await on_progress(done, total)
-                        except Exception as exc:  # progress is observational
-                            _log.warning(
-                                "fulltext_progress_emit_failed",
-                                error_type=type(exc).__name__,
-                            )
+                ok = False
+                try:
+                    async with sem:
+                        ok = await self._ingest_one(client, project_id, paper)
+                except Exception as exc:
+                    _log.warning(
+                        "fulltext_ingest_one_raised",
+                        citation_key=paper.citation_key,
+                        error_type=type(exc).__name__,
+                    )
+                    ok = False
+                finally:
+                    async with progress_lock:
+                        done += 1
+                        if ok:
+                            ingested += 1
+                        if on_progress is not None:
+                            try:
+                                await on_progress(done, total)
+                            except Exception as exc:  # progress is observational
+                                _log.warning(
+                                    "fulltext_progress_emit_failed",
+                                    error_type=type(exc).__name__,
+                                )
 
             # return_exceptions=True so a single failing task can't bubble up
             # and abort the gather — _ingest_one already converts any per-paper
@@ -197,36 +272,15 @@ class FullTextFetcher:
     def _resolve_pdf_url(paper: Paper) -> str | None:
         """Return the legitimate PDF URL for this paper, or None.
 
-        Only ``arxiv`` and ``semantic_scholar`` sources expose a known PDF
-        endpoint. Crossref-only papers reach us with metadata but no direct
-        OA PDF link — they're skipped (the BRD path for those is user upload
-        via the local client, not backend scraping).
+        Uses :func:`_is_allowed_pdf_url` — strict netloc+path matching against
+        the OA allow-list. Substring matching (the prior approach) would let
+        ``https://evil.com/?fake=arxiv.org`` pass. CodeRabbit / W3-Auth fix.
         """
         pdf = paper.pdf_url
         if pdf is None:
             return None
         url = str(pdf)
-        # Trust only the OA mirrors we know about. This is a deliberate allow-
-        # list — keeps us from accidentally hitting publisher hosts whose ToS
-        # forbids automated access.
-        if "arxiv.org" in url or "semanticscholar.org" in url:
-            return url
-        # Some Semantic Scholar `openAccessPdf.url` values point at the
-        # publisher's own OA mirror (e.g. aclanthology.org, biorxiv.org,
-        # plos.org). Those publishers operate the OA mirror specifically to
-        # be downloaded — treat them as OK.
-        oa_hosts = (
-            "aclanthology.org",
-            "biorxiv.org",
-            "medrxiv.org",
-            "plos.org",
-            "nature.com/articles",  # OA Nature articles only — path-checked
-            "frontiersin.org",
-            "mdpi.com",
-            "openreview.net",
-            "ncbi.nlm.nih.gov/pmc",  # PMC = PubMed Central, OA archive
-        )
-        if any(host in url for host in oa_hosts):
+        if _is_allowed_pdf_url(url):
             return url
         # Unknown host — log and skip. We don't try to be clever here.
         _log.info(
@@ -239,14 +293,45 @@ class FullTextFetcher:
     async def _download_pdf(
         self, client: httpx.AsyncClient, url: str, citation_key: str
     ) -> bytes | None:
+        # Manual redirect chain so every hop revalidates against the OA
+        # allow-list (CodeRabbit / W3-Auth). httpx is configured with
+        # follow_redirects=False; we walk up to 5 hops.
+        current = url
         try:
-            resp = await client.get(url)
-            resp.raise_for_status()
+            for _ in range(5):
+                resp = await client.get(current)
+                if resp.status_code in (301, 302, 303, 307, 308):
+                    next_url = resp.headers.get("Location")
+                    if not next_url:
+                        _log.info(
+                            "fulltext_redirect_no_location",
+                            citation_key=citation_key,
+                            status=resp.status_code,
+                        )
+                        return None
+                    # Resolve relative redirects against the current URL.
+                    next_abs = str(httpx.URL(current).join(next_url))
+                    if not _is_allowed_pdf_url(next_abs):
+                        _log.warning(
+                            "fulltext_redirect_outside_allowlist",
+                            citation_key=citation_key,
+                            from_url=current,
+                            to_url=next_abs,
+                        )
+                        return None
+                    current = next_abs
+                    continue
+                resp.raise_for_status()
+                break
+            else:
+                # for/else: 5 redirects without a terminal response.
+                _log.warning("fulltext_redirect_loop", citation_key=citation_key)
+                return None
         except httpx.HTTPError as exc:
             _log.warning(
                 "fulltext_download_failed",
                 citation_key=citation_key,
-                url=url,
+                url=current,
                 error_type=type(exc).__name__,
                 error=str(exc),
             )
@@ -352,6 +437,21 @@ class FullTextFetcher:
             sentences = re.split(r"(?<=[.!?])\s+", para)
             current = ""
             for s in sentences:
+                # CodeRabbit: a single sentence longer than the cap (rare —
+                # equation-heavy run-ons, or PDFs without sentence terminators)
+                # used to be assigned to `current` whole, producing an
+                # oversized chunk. Hard-slice such sentences into substrings
+                # of at most _MAX_CHUNK_CHARS so the cap holds even in the
+                # pathological case.
+                if len(s) > _MAX_CHUNK_CHARS:
+                    if len(current) >= _MIN_CHUNK_CHARS:
+                        chunks.append(current)
+                    current = ""
+                    for start in range(0, len(s), _MAX_CHUNK_CHARS):
+                        piece = s[start : start + _MAX_CHUNK_CHARS]
+                        if len(piece) >= _MIN_CHUNK_CHARS:
+                            chunks.append(piece)
+                    continue
                 if len(current) + len(s) + 1 <= _MAX_CHUNK_CHARS:
                     current = f"{current} {s}".strip()
                 else:

@@ -16,6 +16,7 @@ from uuid import UUID
 import firebase_admin
 from firebase_admin import auth, credentials
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
@@ -129,7 +130,26 @@ async def resolve_or_create_user(
         created_at=datetime.now(tz=UTC),
     )
     db.add(row)
-    await db.flush()
+    try:
+        await db.flush()
+    except IntegrityError:
+        # CodeRabbit / W3-Auth: two concurrent first-login requests can both
+        # pass the SELECT above with existing is None, both INSERT, second
+        # hits the firebase_uid unique constraint. Rollback the failing
+        # half, re-query (the winner has now committed-or-flushed its row),
+        # and return that. Idempotent first-login is the contract.
+        await db.rollback()
+        winner = await db.scalar(select(UserRow).where(UserRow.firebase_uid == firebase_uid))
+        if winner is None:
+            # Should be impossible — the IntegrityError implies a row with
+            # this uid exists. Surface loudly rather than silently returning
+            # a half-built object.
+            raise
+        # Refresh the metadata fields the caller would have updated on the
+        # "existing is not None" happy path.
+        winner.email = email
+        winner.display_name = display_name
+        return winner
     await db.refresh(row)
     return row
 

@@ -119,15 +119,21 @@ class DiscoveryService:
         """
         delay = self._PER_SOURCE_DELAY_S.get(type(adapter), 0.5)
         papers: list[Paper] = []
-        # Fail-fast: a source that 429s for the first 2 queries will keep doing
-        # so for the rest of this run. Each retry-exhausted query costs ~60 s
-        # (HTTP timeout x 3 attempts) -- five of them blocks the whole graph
-        # for minutes. After 2 consecutive empty results we skip the rest and
-        # let the surviving sources carry the discovery.
-        consecutive_empty = 0
+        # Fail-fast: a source that errors for the first 2 queries will keep
+        # doing so for the rest of this run. Each retry-exhausted query costs
+        # ~60 s (HTTP timeout x 3 attempts) -- five of them blocks the whole
+        # graph for minutes. After 2 consecutive FAILURES we skip the rest.
+        #
+        # CodeRabbit follow-up: only true failures (exception, retry-exhausted
+        # -> []) count. A legitimately empty result from an expanded query
+        # is fine — later expanded queries may still hit. Previously a single
+        # zero-hit query path was conflated with a failure and tripped the
+        # short-circuit, missing later queries.
+        consecutive_failures = 0
         for i, query in enumerate(queries):
             if i > 0:
                 await asyncio.sleep(delay)
+            failed = False
             try:
                 if isinstance(adapter, ArXivAdapter):
                     result = await adapter.search(
@@ -143,17 +149,15 @@ class DiscoveryService:
                     error_type=type(exc).__name__,
                     error=str(exc),
                 )
-                # Treat the failure the same as an empty result so a source
-                # that keeps raising trips the short-circuit instead of
-                # blocking the run for minutes (coderabbit PR #5 finding).
                 result = []
+                failed = True
             papers.extend(result)
-            consecutive_empty = 0 if result else consecutive_empty + 1
-            if consecutive_empty >= 2 and i < len(queries) - 1:
+            consecutive_failures = consecutive_failures + 1 if failed else 0
+            if consecutive_failures >= 2 and i < len(queries) - 1:
                 _log.warning(
                     "discovery_source_short_circuited",
                     source=type(adapter).__name__,
-                    consecutive_empty=consecutive_empty,
+                    consecutive_failures=consecutive_failures,
                     skipped_queries=len(queries) - i - 1,
                 )
                 break

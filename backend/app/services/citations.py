@@ -12,6 +12,7 @@ state — unit-testable against a plain DB.
 
 from __future__ import annotations
 
+import re
 from uuid import UUID
 
 from sqlalchemy import select
@@ -20,6 +21,11 @@ from typing_extensions import TypedDict
 
 from app.agents.scribe import _extract_cited_keys
 from app.models.db import ArtifactRow, PaperRow
+
+# Token-aware citation marker. Single source of truth here so the corrections
+# pass can do a one-shot regex sub instead of N iterative str.replace calls
+# (which cascade when a→b and b→c happen to both be in the corrections map).
+_CITATION_MARKER_RE = re.compile(r"\[@([A-Za-z0-9_\-:.]+)\]")
 
 
 class ResolvedCitation(TypedDict):
@@ -107,13 +113,19 @@ async def approved_citation_keys(db: AsyncSession, project_id: UUID) -> set[str]
 def apply_citation_corrections(content: str, corrections: dict[str, str]) -> str:
     """Replace `[@bad]` markers with `[@good]` per the corrections map (FR-1.5).
 
-    Only rewrites the exact `[@<bad>]` token so we never touch prose that merely
-    contains the key as plain text. Order-independent (keys are distinct markers).
+    Single-pass regex sub so the rewrite is truly order-independent: with the
+    prior iterative ``str.replace`` approach a map like ``{"a": "b", "b": "c"}``
+    would cascade — the first pass rewrote ``[@a]`` to ``[@b]``, and the
+    second pass then rewrote that fresh ``[@b]`` to ``[@c]``. CodeRabbit
+    finding; the test exercises both the "no cascade" property and the
+    "non-marker prose untouched" property.
     """
-    out = content
-    for bad, good in corrections.items():
-        out = out.replace(f"[@{bad}]", f"[@{good}]")
-    return out
+
+    def _sub(m: re.Match[str]) -> str:
+        key = m.group(1)
+        return f"[@{corrections[key]}]" if key in corrections else m.group(0)
+
+    return _CITATION_MARKER_RE.sub(_sub, content)
 
 
 def citations_for_content(content: str, pool: list[PaperRow]) -> CitationPanel:

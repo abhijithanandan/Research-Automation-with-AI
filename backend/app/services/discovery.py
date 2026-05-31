@@ -206,7 +206,12 @@ class SemanticScholarAdapter:
         for item in items:
             if not isinstance(item, dict):
                 continue
-            ext_ids: dict[str, str] = item.get("externalIds") or {}
+            # CodeRabbit: defend against non-dict shapes for nested fields —
+            # SS occasionally returns unexpected types under externalIds /
+            # openAccessPdf / authors (e.g., null, list, scalar). Guarding
+            # turns "TypeError mid-loop" into "skip this paper safely".
+            raw_ext_ids = item.get("externalIds")
+            ext_ids: dict[str, str] = raw_ext_ids if isinstance(raw_ext_ids, dict) else {}
             doi = ext_ids.get("DOI", "")
             arxiv_id = ext_ids.get("ArXiv", "")
             external_id = doi or arxiv_id or item.get("paperId", "")
@@ -215,11 +220,18 @@ class SemanticScholarAdapter:
 
             pdf_url: str | None = None
             oap = item.get("openAccessPdf")
-            if oap and oap.get("url"):
-                # Strip stale IEEE /ielx7/ links — see _sanitise_pdf_url docstring.
-                pdf_url = _sanitise_pdf_url(oap["url"])
+            if isinstance(oap, dict):
+                oap_url = oap.get("url")
+                if isinstance(oap_url, str) and oap_url:
+                    # Strip stale IEEE /ielx7/ links — see _sanitise_pdf_url docstring.
+                    pdf_url = _sanitise_pdf_url(oap_url)
 
-            authors = [a.get("name", "") for a in (item.get("authors") or [])]
+            raw_authors = item.get("authors")
+            authors = [
+                a.get("name", "")
+                for a in (raw_authors if isinstance(raw_authors, list) else [])
+                if isinstance(a, dict)
+            ]
             papers.append(
                 Paper(
                     id=uuid4(),
