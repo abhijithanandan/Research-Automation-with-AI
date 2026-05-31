@@ -55,10 +55,13 @@ echo "==> bandit (audit/2026-05-31 gate)"
 # Fail on MEDIUM-or-higher findings. Bandit's CLI returns 0 on filtered runs,
 # so we count from the JSON ourselves. LOW noise (asserts) tracked separately
 # and addressed in the Wave-3 cleanup batch.
-bandit -q -f json -o "$ROOT/reports/bandit.json" -r app || true
+# Use a relative path the way Windows Python expects it — Git Bash's $ROOT
+# resolves to /c/Users/... which Windows Python can't open.
+BANDIT_REPORT="../reports/bandit.json"
+bandit -q -f json -o "$BANDIT_REPORT" -r app || true
 "$PY" -u -c "
 import json, sys
-d = json.load(open('$ROOT/reports/bandit.json'))
+d = json.load(open('$BANDIT_REPORT'))
 m = d.get('metrics', {}).get('_totals', {})
 med, hi = m.get('SEVERITY.MEDIUM', 0), m.get('SEVERITY.HIGH', 0)
 if med + hi > 0:
@@ -98,11 +101,59 @@ else
 fi
 
 echo "==> npm audit (M4-A)"
+# Wave-1 closure accepted 4 residual HIGH advisories on next@14.2.35 as
+# non-exploitable in this deployment (image-optimiser, RSC HTTP-deserialise,
+# rewrites smuggling, postcss CSS-stringify XSS — features not used). The
+# gate blocks on CRITICAL only; the local warn still surfaces HIGH so a real
+# patch landing isn't invisible. When the deferred Next 15.x bump lands,
+# switch this back to --audit-level=high.
+NPM_AUDIT_CI_LEVEL="critical"
+NPM_AUDIT_LOCAL_LEVEL="high"
 if [[ -d "$ROOT/frontend/node_modules" ]]; then
-    (cd "$ROOT/frontend" && npm audit --omit=dev --audit-level=high) \
-        || echo "    npm audit found HIGH/CRITICAL — review before shipping"
+    if [[ "${CI:-0}" == "1" ]]; then
+        (cd "$ROOT/frontend" && npm audit --omit=dev --audit-level="$NPM_AUDIT_CI_LEVEL")
+    else
+        (cd "$ROOT/frontend" && npm audit --omit=dev --audit-level="$NPM_AUDIT_LOCAL_LEVEL") \
+            || echo "    npm audit found HIGH (accepted residuals; see Wave-1 closure) — review for new entries"
+    fi
+elif command -v docker >/dev/null 2>&1 \
+     && docker compose -f "$ROOT/docker-compose.yml" ps frontend 2>/dev/null | grep -q Up; then
+    if [[ "${CI:-0}" == "1" ]]; then
+        docker compose -f "$ROOT/docker-compose.yml" exec -T frontend \
+            sh -c "npm audit --omit=dev --audit-level=$NPM_AUDIT_CI_LEVEL"
+    else
+        docker compose -f "$ROOT/docker-compose.yml" exec -T frontend \
+            sh -c "npm audit --omit=dev --audit-level=$NPM_AUDIT_LOCAL_LEVEL" \
+            || echo "    npm audit found HIGH (accepted residuals; see Wave-1 closure) — review for new entries"
+    fi
 else
-    echo "    frontend/node_modules absent; skip (run 'npm install' in frontend/ to enable)"
+    echo "    frontend/node_modules absent and container not up; skip"
+fi
+
+# --- Frontend type + lint gates (W2-D1) ------------------------------------
+# Always-on contract: tsc strict + next lint clean. Runs against the running
+# frontend container (where node_modules live). Skipped only if neither host
+# node_modules nor a live container exists.
+echo "==> frontend tsc --noEmit (W2-D1)"
+if [[ -d "$ROOT/frontend/node_modules" ]]; then
+    (cd "$ROOT/frontend" && npx tsc --noEmit)
+elif command -v docker >/dev/null 2>&1 \
+     && docker compose -f "$ROOT/docker-compose.yml" ps frontend 2>/dev/null | grep -q Up; then
+    docker compose -f "$ROOT/docker-compose.yml" exec -T frontend \
+        sh -c "npx tsc --noEmit"
+else
+    echo "    frontend not available; skip"
+fi
+
+echo "==> frontend next lint (W2-D1)"
+if [[ -d "$ROOT/frontend/node_modules" ]]; then
+    (cd "$ROOT/frontend" && npx next lint)
+elif command -v docker >/dev/null 2>&1 \
+     && docker compose -f "$ROOT/docker-compose.yml" ps frontend 2>/dev/null | grep -q Up; then
+    docker compose -f "$ROOT/docker-compose.yml" exec -T frontend \
+        sh -c "npx next lint"
+else
+    echo "    frontend not available; skip"
 fi
 
 echo ""
