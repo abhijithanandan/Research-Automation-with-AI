@@ -51,6 +51,16 @@ _HTTP_TIMEOUT = httpx.Timeout(20.0)
 # A DOI looks like "10.<registrant>/<suffix>" — RFC-adjacent regex from
 # the Crossref docs (intentionally permissive on the suffix).
 _DOI_RE = re.compile(r"^10\.\d{4,9}/\S+$")
+# CodeRabbit: Unpaywall URLs carry the operator's email in the query string
+# ("?email=ops@example.com"). httpx exception messages frequently include
+# the URL, so logging str(exc) raw can leak the email into log aggregators.
+# Strip every `email=...` query token from any string we log.
+_EMAIL_QPARAM_RE = re.compile(r"([?&])email=[^&\s]+", flags=re.IGNORECASE)
+
+
+def _scrub(message: str) -> str:
+    """Remove `email=...` query-string tokens from a log message."""
+    return _EMAIL_QPARAM_RE.sub(r"\1email=REDACTED", message)
 
 
 class UnpaywallEnricher:
@@ -128,7 +138,7 @@ class UnpaywallEnricher:
                         "unpaywall_per_paper_error",
                         citation_key=paper.citation_key,
                         error_type=type(exc).__name__,
-                        error=str(exc),
+                        error=_scrub(str(exc)),
                     )
                     enriched.append(paper)
 
@@ -174,7 +184,7 @@ class UnpaywallEnricher:
                 "unpaywall_lookup_failed",
                 citation_key=citation_key,
                 doi=doi,
-                error=str(exc),
+                error=_scrub(str(exc)),
             )
             return None
         except (ValueError, TypeError) as exc:  # JSONDecodeError is a ValueError
@@ -182,7 +192,7 @@ class UnpaywallEnricher:
                 "unpaywall_lookup_bad_json",
                 citation_key=citation_key,
                 doi=doi,
-                error=str(exc),
+                error=_scrub(str(exc)),
             )
             return None
 

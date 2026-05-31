@@ -291,8 +291,6 @@ override is applied, and a `user.citation_correction` audit row records the huma
 
 | Method | Path | Description |
 | --- | --- | --- |
-| Method | Path | Description |
-| --- | --- | --- |
 | GET | `/projects/{id}/artifacts?kind={kind}` | List artifacts, optionally filtered. |
 | GET | `/projects/{id}/artifacts/{artifact_id}` | Fetch a single artifact. |
 | GET | `/projects/{id}/export?format=markdown\|bibtex\|package\|bundle` | Export the manuscript (FR-3.5). See below. |

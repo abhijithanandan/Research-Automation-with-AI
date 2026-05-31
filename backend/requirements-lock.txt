@@ -132,7 +132,13 @@ referencing==0.37.0
 requests==2.34.2
 requests-oauthlib==2.0.0
 requests-toolbelt==1.0.0
--e git+https://github.com/abhijithanandan/Research-Automation-with-AI.git@c51daefcdc3a7ea00f13f241d2a5ddbde713724c#egg=researchflow_backend&subdirectory=backend
+# NOTE: the self-package (`researchflow_backend`) is not pinned here —
+# `pip freeze` emits an editable `-e git+...` line for it when developing
+# locally; that pulled in a live git checkout which is content-unverified
+# and tied to one commit hash. CI installs the project explicitly via
+# `pip install -e ".[dev]" --no-deps` AFTER the locked third-party
+# closure, so omitting the self-entry here keeps the lockfile to its
+# stated purpose: pinning third-party transitive deps. CodeRabbit finding.
 respx==0.23.1
 rich==15.0.0
 rpds-py==0.30.0

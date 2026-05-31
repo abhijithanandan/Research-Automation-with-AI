@@ -58,6 +58,7 @@ echo "==> bandit (audit/2026-05-31 gate)"
 # Use a relative path the way Windows Python expects it — Git Bash's $ROOT
 # resolves to /c/Users/... which Windows Python can't open.
 BANDIT_REPORT="../reports/bandit.json"
+mkdir -p "$(dirname "$BANDIT_REPORT")"
 bandit -q -f json -o "$BANDIT_REPORT" -r app || true
 "$PY" -u -c "
 import json, sys

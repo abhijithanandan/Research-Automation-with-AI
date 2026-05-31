@@ -252,6 +252,12 @@ async def project_events(project_id: UUID, ws: WebSocket) -> None:
         _done, pending = await asyncio.wait([sender, reader], return_when=asyncio.FIRST_COMPLETED)
         for task in pending:
             task.cancel()
+        # CodeRabbit: await the cancelled tasks so their CancelledError
+        # surfaces and gets consumed by gather. Without this the asyncio
+        # event loop logs "Task was destroyed but it is pending!" / leaves
+        # CancelledError unobserved on Python 3.11+.
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
     except WebSocketDisconnect:
         pass
     finally:
