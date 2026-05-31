@@ -54,11 +54,9 @@ class ApprovePayload(BaseModel):
     override_reason: str | None = Field(default=None, max_length=_MAX_FEEDBACK_CHARS)
 
     @model_validator(mode="after")
-    def _require_reason_on_force(self) -> "ApprovePayload":
+    def _require_reason_on_force(self) -> ApprovePayload:
         if self.force_unresolved and not (self.override_reason or "").strip():
-            raise ValueError(
-                "override_reason is required (non-empty) when force_unresolved=true"
-            )
+            raise ValueError("override_reason is required (non-empty) when force_unresolved=true")
         return self
 
 

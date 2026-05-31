@@ -208,8 +208,20 @@ async def node_synthesize(state: GraphState) -> GraphState:
 
         try:
             from app.services.fulltext_fetcher import get_fulltext_fetcher
+            from app.services.workflow import _emit as _emit_ws
 
-            fulltext_ingested = await get_fulltext_fetcher().ingest(project_id, approved_papers)
+            # W2-C1: emit a `fulltext_progress` WS event after each paper
+            # finishes so the frontend can render a "N/M papers indexed" chip
+            # during what used to be a silent ~120s wait.
+            async def _on_progress(done: int, total: int) -> None:
+                await _emit_ws(
+                    project_id,
+                    {"type": "fulltext_progress", "done": done, "total": total},
+                )
+
+            fulltext_ingested = await get_fulltext_fetcher().ingest(
+                project_id, approved_papers, on_progress=_on_progress
+            )
             _log.info(
                 "fulltext_ingest_done",
                 project_id=str(project_id),

@@ -194,6 +194,11 @@ export default function HomePage() {
   >(null);
   // Bump whenever a section_ready event lands so the telemetry chips refetch.
   const [telemetryRefresh, setTelemetryRefresh] = useState(0);
+  // W2-C1: fulltext PDF ingest progress (between Phase-1 approve and the
+  // Critic starting). null = idle, otherwise {done,total} for the busy chip.
+  const [fulltextProgress, setFulltextProgress] = useState<
+    { done: number; total: number } | null
+  >(null);
   const wsRef = useRef<ManagedSocket | null>(null);
 
   useEffect(() => {
@@ -250,6 +255,9 @@ export default function HomePage() {
           // paper pool so the matrix can show titles (not just citation keys).
           setSynthesisLoading(true);
           setView("synthesis");
+          // W2-C1: fulltext ingest is finished by now (the Critic just
+          // synthesized). Clear the progress chip.
+          setFulltextProgress(null);
           Promise.all([
             api.artifacts.list(projectId, "matrix", DEV_TOKEN),
             api.artifacts.list(projectId, "summary", DEV_TOKEN),
@@ -332,6 +340,13 @@ export default function HomePage() {
           message: `Token cap reached: spent $${evt.spend_usd.toFixed(2)} of the $${evt.cap_usd.toFixed(2)} budget. Raise the project's cap to continue.`,
         });
         setView("error");
+        break;
+      case "fulltext_progress":
+        // W2-C1: the Critic's fulltext fetcher reports per-paper completion.
+        // We just track latest done/total; the busy-view chip reads this slot.
+        // Clear automatically when the run advances past synthesis (handled
+        // by approval.required for phase=synthesis, below).
+        setFulltextProgress({ done: evt.done, total: evt.total });
         break;
     }
   }, []);
@@ -584,6 +599,26 @@ export default function HomePage() {
                 <span className="h-3.5 w-3.5 animate-spin rounded-full border-2 border-border border-t-primary" />
                 {view === "busy" ? "Waiting for the workflow to advance…" : "Librarian is fetching papers…"}
               </div>
+
+              {/* W2-C1: live fulltext-ingest progress while the Critic prepares
+                  RAG context (used to be a silent ~120s gap). */}
+              {fulltextProgress && fulltextProgress.total > 0 && (
+                <div className="flex items-center gap-2 font-mono text-[11px] uppercase tracking-[0.12em] text-muted">
+                  <span>fulltext indexed</span>
+                  <span className="text-primary">
+                    {fulltextProgress.done}/{fulltextProgress.total} papers
+                  </span>
+                  <div className="h-1 flex-1 max-w-xs overflow-hidden rounded-full bg-surface-elevated">
+                    <div
+                      className="h-full rounded-full bg-primary transition-all duration-300"
+                      style={{
+                        width: `${Math.min(100, (fulltextProgress.done / fulltextProgress.total) * 100)}%`,
+                      }}
+                    />
+                  </div>
+                </div>
+              )}
+
               <AgentLog lines={logLines} endRef={logEndRef} />
             </div>
           )}
