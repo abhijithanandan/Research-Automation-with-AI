@@ -9,7 +9,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app import __version__
-from app.api.routes import artifacts, health, papers, projects, websocket, workflow
+from app.api.routes import artifacts, datasets, health, papers, projects, websocket, workflow
 from app.config import get_settings
 from app.utils.logging import configure_logging
 
@@ -163,6 +163,7 @@ def create_app() -> FastAPI:
     app.include_router(workflow.router, prefix=api_prefix)
     app.include_router(papers.router, prefix=api_prefix)
     app.include_router(artifacts.router, prefix=api_prefix)
+    app.include_router(datasets.router, prefix=api_prefix)
     app.include_router(websocket.router, prefix=api_prefix)
 
     return app

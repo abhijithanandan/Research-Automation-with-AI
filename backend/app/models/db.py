@@ -9,9 +9,11 @@ from uuid import UUID, uuid4
 from sqlalchemy import (
     JSON,
     TIMESTAMP,
+    BigInteger,
     CheckConstraint,
     ForeignKey,
     Index,
+    Integer,
     Numeric,
     String,
     Text,
@@ -123,6 +125,33 @@ class PaperRow(Base):
     citation_count: Mapped[int | None]
     approved: Mapped[bool] = mapped_column(default=False)
     added_at: Mapped[datetime] = mapped_column(_TS)
+
+
+class DatasetRow(Base):
+    """User-uploaded tabular datasets for the Analyst (Phase 3, FR-2.3).
+
+    Unique on (project_id, sha256): a duplicate upload is rejected with 409.
+    `storage_uri` is a `file://...` URI in dev (under DATA_DIR), `s3://...`
+    in prod. Adapter logic in `services.dataset_storage`.
+    """
+
+    __tablename__ = "datasets"
+    __table_args__ = (
+        UniqueConstraint("project_id", "sha256", name="uq_datasets_project_sha256"),
+        Index("ix_datasets_project", "project_id"),
+    )
+
+    id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), primary_key=True, default=uuid4)
+    project_id: Mapped[UUID] = mapped_column(
+        PGUUID(as_uuid=True), ForeignKey("projects.id", ondelete="CASCADE")
+    )
+    filename: Mapped[str] = mapped_column(String)
+    sha256: Mapped[str] = mapped_column(String(64))
+    storage_uri: Mapped[str] = mapped_column(String)
+    columns: Mapped[list[str]] = mapped_column(JSON)
+    rowcount: Mapped[int] = mapped_column(Integer)
+    bytes: Mapped[int] = mapped_column(BigInteger)
+    uploaded_at: Mapped[datetime] = mapped_column(_TS)
 
 
 class ArtifactRow(Base):

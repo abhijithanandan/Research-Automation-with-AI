@@ -4,6 +4,7 @@
 import type {
   Artifact,
   CitationPanel,
+  Dataset,
   ExportFormat,
   Paper,
   Project,
@@ -294,5 +295,60 @@ export const api = {
     /** Token + cost rollup + Phase-4 drafting{} telemetry block (NFR-6 / §9). */
     get: (projectId: string, token: string) =>
       request<UsageRollup>(`/projects/${projectId}/usage`, { token }),
+  },
+
+  datasets: {
+    /** List the project's uploaded datasets (newest first). Phase 3 / FR-2.3. */
+    list: (projectId: string, token: string) =>
+      request<Dataset[]>(`/projects/${projectId}/datasets`, { token }),
+
+    /** Multipart upload. Returns the populated Dataset (with sha256, columns, rowcount). */
+    upload: async (
+      projectId: string,
+      file: File,
+      token: string,
+    ): Promise<Dataset> => {
+      const form = new FormData();
+      form.append("file", file);
+      // FormData uploads need to skip the JSON Content-Type the request()
+      // helper sets, so go direct here.
+      const res = await fetch(
+        `${BASE_URL}/api/v1/projects/${projectId}/datasets/upload`,
+        {
+          method: "POST",
+          body: form,
+          headers: { Authorization: `Bearer ${token}` },
+        },
+      );
+      if (!res.ok) {
+        let detail: unknown;
+        try {
+          detail = await res.json();
+        } catch {
+          detail = { error: { code: "unknown", message: res.statusText } };
+        }
+        const errCode =
+          (detail as { detail?: { code?: string } })?.detail?.code ??
+          "upload_failed";
+        const errMessage =
+          (detail as { detail?: { message?: string } })?.detail?.message ??
+          `Upload failed (${res.status})`;
+        throw new ApiError(
+          classifyStatus(res.status),
+          res.status,
+          errCode,
+          errMessage,
+          detail,
+        );
+      }
+      return (await res.json()) as Dataset;
+    },
+
+    /** Remove a dataset. 409 once Phase 3 starts. */
+    delete: (projectId: string, datasetId: string, token: string) =>
+      request<void>(`/projects/${projectId}/datasets/${datasetId}`, {
+        method: "DELETE",
+        token,
+      }),
   },
 };

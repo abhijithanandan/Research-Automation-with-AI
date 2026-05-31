@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import { ApprovalPanel, type OverridePayload } from "@/components/workflow/ApprovalPanel";
+import { DatasetUploader } from "@/components/workflow/DatasetUploader";
 import { DraftingTelemetryChips } from "@/components/workflow/DraftingTelemetryChips";
 import { ExportPanel } from "@/components/workflow/ExportPanel";
 import { Markdown } from "@/components/workflow/Markdown";
@@ -17,7 +18,7 @@ import {
   type SynthesisOverridePayload,
 } from "@/components/workflow/SynthesisReview";
 import { ApiError, api } from "@/lib/api";
-import type { Artifact, Paper, Phase, SectionName, WorkflowState } from "@/lib/types";
+import type { Artifact, Dataset, Paper, Phase, SectionName, WorkflowState } from "@/lib/types";
 import { cn, focusRing } from "@/lib/utils";
 import { connectProjectEvents, type ManagedSocket, type ServerEvent } from "@/lib/ws";
 
@@ -181,6 +182,8 @@ export default function HomePage() {
   const [matrix, setMatrix] = useState<Artifact | null>(null);
   const [summary, setSummary] = useState<Artifact | null>(null);
   const [synthesisLoading, setSynthesisLoading] = useState(false);
+  // Phase 3 — Analyst datasets (uploaded by the user during Phase 1/2 review).
+  const [datasets, setDatasets] = useState<Dataset[]>([]);
   // Phase 4 — drafting state
   const [sectionArtifact, setSectionArtifact] = useState<Artifact | null>(null);
   const [currentSection, setCurrentSection] = useState<SectionName | null>(null);
@@ -374,6 +377,7 @@ export default function HomePage() {
     setError(null);
     setLogLines([]);
     setPapers([]);
+    setDatasets([]);
     setMatrix(null);
     setSummary(null);
     setSectionArtifact(null);
@@ -696,6 +700,23 @@ export default function HomePage() {
           {view === "awaiting" && (
             <div className="max-w-4xl space-y-8 animate-fade-in">
               <AgentLog lines={logLines} endRef={logEndRef} />
+
+              {/* Phase-3 datasets: optional uploader. Datasets must be in place
+                  before the Analyst runs (which happens after Phase-2 approval).
+                  Phase-1 / Phase-2 awaiting is the canonical place to attach
+                  them — visible only while the pool is still open. */}
+              {ctx && (
+                <DatasetUploader
+                  projectId={ctx.projectId}
+                  token={DEV_TOKEN}
+                  datasets={datasets}
+                  onUploaded={(d) => setDatasets((cur) => [d, ...cur])}
+                  onDeleted={(id) =>
+                    setDatasets((cur) => cur.filter((d) => d.id !== id))
+                  }
+                  locked={false}
+                />
+              )}
 
               {/* Section header — whitespace + type, no box */}
               <div className="flex items-end justify-between">
