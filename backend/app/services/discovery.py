@@ -109,6 +109,23 @@ def _safe_json(resp: httpx.Response, source: str, query: str) -> dict[str, objec
     return data
 
 
+def _coerce_id(value: object) -> str:
+    """Coerce an externalIds value to a string.
+
+    SS's docs say each nested value is a string, but a malformed response
+    could surface a list (``"DOI": ["10.1/foo"]``) or null. Accept a string
+    as-is; for a non-empty list/tuple take the first element if it's a
+    string; otherwise return ``""``. Hoisted to module scope so the SS
+    adapter's parse loop doesn't redefine it per-iteration (CodeRabbit nit).
+    """
+    if isinstance(value, str):
+        return value
+    if isinstance(value, list | tuple) and value:
+        first = value[0]
+        return first if isinstance(first, str) else ""
+    return ""
+
+
 def _sanitise_pdf_url(url: str | None) -> str | None:
     """Reject ``openAccessPdf.url`` values we know are dead.
 
@@ -228,20 +245,10 @@ class SemanticScholarAdapter:
             raw_ext_ids = item.get("externalIds")
             ext_ids: dict[str, object] = raw_ext_ids if isinstance(raw_ext_ids, dict) else {}
 
-            # CodeRabbit follow-up: ext_ids VALUES may also be non-strings.
-            # SS docs say each is a string, but a malformed response could
-            # surface a list ("DOI": ["10.1/foo"]) or null. Accept a string
-            # as-is; for list/tuple take the first string element; otherwise
-            # treat as missing. Pydantic would have rejected a non-string
-            # external_id anyway — this just keeps more papers in the pool.
-            def _coerce_id(value: object) -> str:
-                if isinstance(value, str):
-                    return value
-                if isinstance(value, list | tuple) and value:
-                    first = value[0]
-                    return first if isinstance(first, str) else ""
-                return ""
-
+            # _coerce_id (module scope) handles non-string values: SS may
+            # surface a list (`"DOI": ["10.1/foo"]`) or null where a string
+            # is expected. Pydantic would have rejected a non-string
+            # external_id at construction; this keeps the paper in the pool.
             doi = _coerce_id(ext_ids.get("DOI"))
             arxiv_id = _coerce_id(ext_ids.get("ArXiv"))
             paper_id_raw = item.get("paperId", "")
