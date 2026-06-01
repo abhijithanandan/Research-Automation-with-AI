@@ -5,14 +5,14 @@
 ![FastAPI](https://img.shields.io/badge/FastAPI-0.110+-009688.svg)
 ![LangGraph](https://img.shields.io/badge/LangGraph-Agentic-orange)
 ![License](https://img.shields.io/badge/License-MIT-green.svg)
-![Status](https://img.shields.io/badge/status-Phase%204%20Hardened-green.svg)
+![Status](https://img.shields.io/badge/status-Phase%203%20Shipped-green.svg)
 
 ResearchFlow AI is a hybrid, multi-agent AI workflow designed to accelerate academic and technical research. The system automates repetitive tasks across the research lifecycle — from literature discovery through manuscript drafting — while keeping a human firmly in control of every consequential decision.
 
 A defining principle is **Strict Human-in-the-Loop (HITL) Orchestration**: the AI is a co-pilot, not a replacement. The state machine *cannot* advance between phases without an explicit human approval event.
 
 > [!NOTE]
-> **Status:** **Phases 1, 2, and 4** are fully implemented, verified, and hardened — matching the BRD v0.1 MVP scope (Phase 3 / Analyst is correctly deferred to v0.2; see `docs/brd-verification-and-phase3-plan.md`). All 19 audit findings (4 H + 7 M + 8 L) are closed; bandit reports 0 HIGH / 0 MEDIUM / 0 LOW; pytest is at 321 passing; ruff / mypy --strict / frontend tsc / next lint / npm audit all clean.
+> **Status:** **All four phases are now live.** Phases 1, 2, and 4 ship as before (matching BRD v0.1 MVP scope); **Phase 3 (Analyst / sandboxed compute, FR-2.3) is now implemented end-to-end** per the v0.2 roadmap — dataset upload pipeline, LLM code proposal with AST denylist scan, hardened Docker sandbox (`--network=none --read-only --cap-drop=ALL`), two HITL gates (`await_code_approval` + `await_analysis_approval`), and the `AnalysisReview.tsx` UI surface. SPEC is at **v0.3**. pytest is at **373 passing** (plus 3 Docker-gated integration tests); ruff, mypy --strict, frontend tsc, vitest, and next lint all clean. See `docs/PHASE3_IMPLEMENTATION_PLAN.md` for the full sprint ledger.
 
 ---
 
