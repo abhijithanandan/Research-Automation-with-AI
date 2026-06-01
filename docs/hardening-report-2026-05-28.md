@@ -1,4 +1,4 @@
-# ResearchFlow AI — Hardening Report
+# ResearchFlow AI — Hardening Report 1
 
 **Program:** Complete Codebase Hardening (M1–M4)
 **Branch:** `feature/phase-4`
