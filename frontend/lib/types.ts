@@ -151,6 +151,36 @@ export interface CitationPanel {
   resolved: ResolvedCitation[];
 }
 
+/** Phase-3 static-scan summary surfaced at the code-approval gate. Mirrors
+ *  backend StaticScanResult (app/agents/analyst.py). */
+export interface StaticScanResult {
+  ok: boolean;
+  denied: string[];
+  unknown: string[];
+  error: string | null;
+}
+
+/** The Analyst's code proposal as surfaced at the await_code_approval gate. */
+export interface AnalystProposal {
+  code: Artifact; // kind="code", produced_by="analyst"
+  methods_narrative: string;
+  scan: StaticScanResult;
+}
+
+/** Sandbox execution outcome surfaced at the await_analysis_approval gate. */
+export interface AnalystResult {
+  exit_code: number;
+  stdout: string;
+  stderr: string;
+  duration_ms: number;
+  timed_out: boolean;
+  oomed: boolean;
+  /** Figure index + size; PNG bytes flow via the artifact endpoint. */
+  figures: { index: number; bytes: number }[];
+  /** Optional in-memory base64 list (when the page hydrates from a state dump). */
+  figures_b64?: string[];
+}
+
 /** A user-uploaded tabular dataset (Phase 3 / FR-2.3, SPEC v0.3 §2.2). */
 export interface Dataset {
   id: string;

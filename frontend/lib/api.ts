@@ -297,6 +297,43 @@ export const api = {
       request<UsageRollup>(`/projects/${projectId}/usage`, { token }),
   },
 
+  analysis: {
+    /** Approve the Analyst's proposed code (optionally substituting an
+     *  edited version). Server scans override_code against the AST denylist
+     *  before resuming the graph; on a deny we get 422 with `code` =
+     *  `code_static_scan_failed`. (SPEC v0.3 §3.3) */
+    approveCode: (
+      projectId: string,
+      body: { feedback?: string | null; override_code?: string | null },
+      token: string,
+    ) =>
+      request<WorkflowRun>(
+        `/projects/${projectId}/workflow/analysis/approve-code`,
+        { method: "POST", body: JSON.stringify(body), token },
+      ),
+    /** Reject the proposed code; feedback is required (the LLM uses it
+     *  as the revision instruction when regenerating). */
+    rejectCode: (projectId: string, feedback: string, token: string) =>
+      request<WorkflowRun>(
+        `/projects/${projectId}/workflow/analysis/reject-code`,
+        { method: "POST", body: JSON.stringify({ feedback }), token },
+      ),
+    approveResults: (
+      projectId: string,
+      feedback: string | null,
+      token: string,
+    ) =>
+      request<WorkflowRun>(
+        `/projects/${projectId}/workflow/analysis/approve-results`,
+        { method: "POST", body: JSON.stringify({ feedback }), token },
+      ),
+    rejectResults: (projectId: string, feedback: string, token: string) =>
+      request<WorkflowRun>(
+        `/projects/${projectId}/workflow/analysis/reject-results`,
+        { method: "POST", body: JSON.stringify({ feedback }), token },
+      ),
+  },
+
   datasets: {
     /** List the project's uploaded datasets (newest first). Phase 3 / FR-2.3. */
     list: (projectId: string, token: string) =>
