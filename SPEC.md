@@ -1,6 +1,6 @@
 # Technical Specification — ResearchFlow AI
 
-**Version:** 0.2 (Pre-MVP) — adds the Phase-4 Feature Pack contract (Export Pack FR-3.5, Citation Manager v1 FR-1.5, Phase-4 telemetry NFR-6/§9). All additions are additive and non-breaking.
+**Version:** 0.3 (v0.2 milestone) — activates the Phase-3 Analyst pipeline (FR-2.3) with the dataset upload routes, two new HITL gates (`analysis.code` + `analysis.results`) and dedicated approve/reject endpoints, the `datasets` table, and the `gate=code|results` discriminator on Phase-3 `approval.required` WS events. All additions are additive and non-breaking; v0.2 (Phase-4 Feature Pack) contract is unchanged.
 **Status:** Source of truth for implementation. Code must match this document. Update this document *before* changing a contract.
 
 This is the **spec-driven development sheet**. Every endpoint, data model, event, and state transition the team will implement is captured here. Updates to a contract require a PR to this file with reviewer sign-off *before* implementation work begins.
@@ -105,6 +105,17 @@ class Artifact(BaseModel):
     parent_id: UUID | None      # for revisions
     created_at: datetime
 
+# Phase 3 input (FR-2.3, SPEC v0.3 addition).
+class Dataset(BaseModel):
+    id: UUID
+    project_id: UUID
+    filename: str
+    sha256: str                 # 64-char lowercase hex
+    columns: list[str]
+    rowcount: int
+    bytes: int
+    uploaded_at: datetime
+
 # Audit trail
 class AuditLogEntry(BaseModel):
     id: UUID
@@ -198,6 +209,21 @@ CREATE TABLE audit_log (
     created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 CREATE INDEX idx_audit_project ON audit_log(project_id, created_at DESC);
+
+-- Phase 3 (alembic 0008): user-uploaded tabular datasets.
+CREATE TABLE datasets (
+    id UUID PRIMARY KEY,
+    project_id UUID NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    filename TEXT NOT NULL,
+    sha256 VARCHAR(64) NOT NULL,
+    storage_uri TEXT NOT NULL,           -- file://... in dev, s3://... in prod
+    columns JSONB NOT NULL,
+    rowcount INT NOT NULL,
+    bytes BIGINT NOT NULL,
+    uploaded_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    UNIQUE (project_id, sha256)
+);
+CREATE INDEX ix_datasets_project ON datasets(project_id);
 ```
 
 ---
@@ -246,6 +272,10 @@ The canonical machine-readable form lives in [`docs/api/openapi.yaml`](./docs/ap
 | POST | `/projects/{id}/workflow/approve` | Approve the pending phase and advance. |
 | POST | `/projects/{id}/workflow/reject` | Reject; supply `{ "feedback": "..." }` to regenerate. |
 | POST | `/projects/{id}/workflow/override` | Submit a manually-edited artifact in place of the agent output. |
+| POST | `/projects/{id}/workflow/analysis/approve-code` | **Phase 3.** Approve the Analyst's code (optionally with `override_code`); graph runs the sandbox. |
+| POST | `/projects/{id}/workflow/analysis/reject-code` | **Phase 3.** Reject the proposed code; graph re-runs `analyze_propose` with feedback. |
+| POST | `/projects/{id}/workflow/analysis/approve-results` | **Phase 3.** Approve the executed results; graph advances to drafting. |
+| POST | `/projects/{id}/workflow/analysis/reject-results` | **Phase 3.** Reject the results; graph re-runs `analyze_propose`. |
 
 **Approve / reject payload**
 ```json
@@ -278,6 +308,19 @@ is set with an `override_reason`. A forced approve records `forced_unresolved` +
 `{bad: good}` rewrites the exact `[@bad]` marker to `[@good]` in `content` before the
 override is applied, and a `user.citation_correction` audit row records the human edit.
 
+**Phase-3 approve-code payload** (`analysis/approve-code`):
+```json
+{ "feedback": "optional notes", "override_code": "import pandas as pd\\n..." }
+```
+`override_code` is scanned against the AST denylist (`os`, `subprocess`, `socket`,
+`requests`, ...) BEFORE the graph resumes; a denied import returns `422 { code:
+"code_static_scan_failed", denied: ["os"] }`. A successful override is recorded as
+`analysis.code_overridden` in addition to `analysis.code_approved`.
+
+**Phase-3 reject payloads** (`analysis/reject-code`, `analysis/reject-results`)
+require a non-empty `feedback` string — `422 { code: "feedback_required" }` otherwise.
+The feedback becomes the LLM's revision instruction on regenerate.
+
 ### 3.4 Papers
 
 | Method | Path | Description |
@@ -308,7 +351,26 @@ otherwise `409 { code: "manuscript_not_ready" }`. Each returns a downloadable fi
 
 LaTeX is **not** a valid format; a `latex` value is an ordinary `422` validation error.
 
-### 3.6 Audit & telemetry
+### 3.6 Datasets (Phase 3 / FR-2.3)
+
+| Method | Path | Description |
+| --- | --- | --- |
+| GET | `/projects/{id}/datasets` | List uploaded datasets (newest first). |
+| POST | `/projects/{id}/datasets/upload` | Multipart upload (CSV/TSV/JSON/JSONL/Parquet). Returns the populated `Dataset`. |
+| DELETE | `/projects/{id}/datasets/{dataset_id}` | Remove a dataset. Locked (`409 phase_locked`) once `run.phase ∈ {analysis, drafting, done}`. |
+
+**Upload constraints**
+- Body size cap: `settings.max_dataset_bytes` (default 50 MiB). Larger → `413`.
+- Extension whitelist: `.csv .tsv .json .jsonl .parquet`. Unknown → `422`.
+- Byte-identical re-upload (same `sha256` + `project_id`): `409 { code: "dataset_duplicate" }`.
+
+**Storage URI scheme.** Dev backend writes `file:///abs/path/...` under
+`DATA_DIR/<project_id>/<dataset_id>/<filename>`. Prod adapter (Sprint 6+) swaps for
+`s3://bucket/<project_id>/<dataset_id>/<filename>`. The graph's `analyze_execute`
+node always reads via `dataset_storage.read_bytes(storage_uri)` so the scheme is
+opaque to the agent.
+
+### 3.7 Audit & telemetry
 
 | Method | Path | Description |
 | --- | --- | --- |
@@ -327,7 +389,7 @@ additive `drafting{}` block (NFR-6 / §9 success metrics), derived from `audit_l
   `citation_corrections` — `user.citation_correction` rows. `avg_section_ms` — mean of
   `draft_ms` on `phase_4.section_ready` rows (`null` if none recorded).
 
-### 3.7 Error format
+### 3.8 Error format
 
 All errors return:
 ```json
@@ -339,7 +401,7 @@ All errors return:
   }
 }
 ```
-Standard codes: `unauthorized` (401), `forbidden` (403), `not_found` (404), `validation_error` (422), `phase_locked` (409), `token_cap_reached` (402), `provider_error` (502), `manuscript_not_ready` (409, export before Phase 4 done), `unresolved_citations` (409, section approve blocked on hallucinated citation keys).
+Standard codes: `unauthorized` (401), `forbidden` (403), `not_found` (404), `validation_error` (422), `phase_locked` (409), `token_cap_reached` (402), `provider_error` (502), `manuscript_not_ready` (409, export before Phase 4 done), `unresolved_citations` (409, section approve blocked on hallucinated citation keys), `dataset_duplicate` (409, byte-identical re-upload), `code_static_scan_failed` (422, override or LLM code uses denylisted import), `feedback_required` (422, empty feedback on a Phase-3 reject).
 
 ---
 
@@ -359,7 +421,7 @@ All messages are JSON. Every event has a `type` and `ts` (ISO-8601). Client-boun
 | `agent.token` | `{ agent, run_id, delta }` | Streaming LLM token. High-frequency. |
 | `agent.completed` | `{ agent, run_id, artifact_ids }` | An agent finishes. |
 | `agent.error` | `{ agent, run_id, error }` | Agent failed (recoverable). |
-| `approval.required` | `{ phase, run_id, summary, section? }` | Engine has paused awaiting human input. `section` is present only when `phase = "drafting"` and identifies which of the seven canonical sections is up for review (BRD §5.2 FR-2.4). |
+| `approval.required` | `{ phase, run_id, summary, section?, gate? }` | Engine has paused awaiting human input. `section` is present only when `phase = "drafting"` (BRD §5.2 FR-2.4). `gate` is present only when `phase = "analysis"` and is one of `"code"` (pre-execution) or `"results"` (post-execution) — SPEC v0.3 / FR-2.3. |
 | `usage.tick` | `{ tokens_in, tokens_out, cost_usd }` | Periodic usage rollup (≤ every 5s). |
 | `cost.cap_warn` | `{ run_id, spend_usd, cap_usd, warn_pct }` | Project spend crossed `token_cap_warn_pct` of the cap (NFR-5). Advisory — the run continues. |
 | `cost.cap_exceeded` | `{ run_id, spend_usd, cap_usd }` | Project spend reached `token_cap_usd` (NFR-5). The run is moved to `error`; the user must raise the cap to continue. |
@@ -384,8 +446,10 @@ Most actions go via REST; the WS channel is mostly server→client. The only cli
 | `await_pool_approval` | Discovery | — | (gate) |
 | `synthesize` | Synthesis | Critic | `matrix` + `summary` artifacts |
 | `await_synthesis_approval` | Synthesis | — | (gate) |
-| `analyze` (v0.2) | Analysis | Analyst | `code` + `figure` artifacts |
-| `await_analysis_approval` (v0.2) | Analysis | — | (gate) |
+| `analyze_propose` | Analysis | Analyst | `code` artifact + methods narrative (no execution yet — opt-in by dataset presence) |
+| `await_code_approval` | Analysis | — | (gate — user reviews code BEFORE sandbox runs, BRD §10 invariant) |
+| `analyze_execute` | Analysis | Analyst | Sandbox run; `figure` + `log` artifacts |
+| `await_analysis_approval` | Analysis | — | (gate — user reviews results after execution) |
 | `draft_section` | Drafting | Scribe | `section` artifact (one section per pass) |
 | `await_section_approval` | Drafting | — | (gate) |
 | `assemble` | Drafting | — | Final manuscript artifact |
@@ -399,9 +463,19 @@ START → discover → await_pool_approval
   reject:    → discover (with feedback)
 
 synthesize → await_synthesis_approval
-  approve:   → (analyze if Phase 3 enabled, else draft_section)
-  reject:    → synthesize (with feedback)
-  override:  → (analyze | draft_section)
+  approve & state.datasets non-empty: → analyze_propose
+  approve & state.datasets empty:     → draft_section
+  reject:                              → synthesize (with feedback)
+  override:                            → (analyze_propose | draft_section)
+
+analyze_propose → await_code_approval
+  approve:                  → analyze_execute (sandbox run)
+  approve + override_code:  → analyze_execute (user-edited code, scanned first)
+  reject:                   → analyze_propose (regenerate with feedback)
+
+analyze_execute → await_analysis_approval
+  approve:   → draft_section
+  reject:    → analyze_propose (regenerate from scratch with feedback)
 
 draft_section → await_section_approval
   approve & sections_remaining: → draft_section (next section)
@@ -456,19 +530,63 @@ class CriticOutput(BaseModel):
     summary: Artifact           # kind="summary"
 ```
 
-### 6.3 Analyst (v0.2)
+### 6.3 Analyst — Phase 3 (Sandbox Compute)
+
+The Analyst persona ships as **two** invocations per Phase-3 cycle: one
+proposes code (gated by `await_code_approval`), one runs it in the
+sandbox after approve (gated by `await_analysis_approval`).
 
 ```python
+class DatasetRef(BaseModel):
+    """Schema-only summary the LLM receives — bytes never enter the prompt."""
+    id: UUID
+    filename: str
+    columns: list[str]
+    rowcount: int
+
 class AnalystInput(BaseModel):
+    project_id: UUID
     task_description: str
-    dataset_refs: list[str]     # object-storage URIs
-    feedback: str | None = None
+    datasets: list[DatasetRef]
+    feedback: str | None = None         # populated on regenerate
+    prior_code: str | None = None       # populated on regenerate (revise, don't restart)
+
+class StaticScanResult(BaseModel):
+    ok: bool                            # False if denied or SyntaxError
+    denied: list[str]                   # imports hit by the denylist
+    unknown: list[str]                  # imports not in the sandbox image (warn-only)
+    error: str | None                   # set when source fails to parse
+
+class AnalystProposal(BaseModel):
+    code: Artifact                      # kind="code", produced_by="analyst"
+    methods_narrative: str              # quoted by Scribe in §Methodology
+    scan: StaticScanResult
 
 class AnalystOutput(BaseModel):
-    code: Artifact              # kind="code"
-    figures: list[Artifact]     # kind="figure"
-    log: Artifact               # kind="log"
+    proposal: AnalystProposal
+    usage: AnalystUsage                 # tokens_in/out + cost_usd for cap rollup
 ```
+
+**Sandbox contract** (`app/services/sandbox.run_in_sandbox`):
+- Docker per-call (T2 tier) with `--network=none --read-only
+  --cap-drop=ALL --security-opt=no-new-privileges --user=65534:65534
+  --pids-limit=64 --memory=512m --memory-swap=512m --cpus=1.0` (defaults
+  configurable per call). 60-second wall-clock timeout.
+- Output truncation: 64 KiB per stream (`MAX_STDOUT_BYTES` / `MAX_STDERR_BYTES`).
+- OOM (Docker exit 137) surfaces as `result.oomed=True`; timeouts as
+  `result.timed_out=True`; the function never raises on infrastructure
+  failure (sandbox unavailable / docker missing surfaces as a
+  `SandboxUnavailableError` only at the run_in_sandbox boundary).
+
+**Static AST scan** (`app/agents/analyst._validate_proposed_code`):
+- Hard-rejects imports of `os, sys, subprocess, socket, shutil, tempfile,
+  ctypes, requests, urllib*, httpx, aiohttp, pickle, marshal, pty,
+  asyncio, multiprocessing, threading, platform, pathlib` (top-level OR
+  lazy).
+- Warns on imports outside the pre-installed sandbox image
+  (`numpy / pandas / matplotlib / scipy / sklearn` + stdlib essentials).
+- The same scan applies to `override_code` on `approve-code` (route
+  layer) — `422 code_static_scan_failed` on a denied import.
 
 ### 6.4 Scribe
 
