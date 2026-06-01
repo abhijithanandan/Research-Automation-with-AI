@@ -254,6 +254,151 @@ async def override(
     )
 
 
+# ---------------------------------------------------------------------------
+# Phase 3 — analysis gates (SPEC v0.3 §3.3). Dedicated endpoints (rather than
+# overloading /approve|/reject) keep the audit trail unambiguous and give the
+# code-approval path a place to validate override_code with the AST denylist
+# BEFORE we resume the graph.
+# ---------------------------------------------------------------------------
+
+
+class ApproveCodePayload(BaseModel):
+    """Approve the Phase-3 code proposal.
+
+    `override_code` is the optional user-edited code that replaces the LLM's
+    proposal. It's scanned for denied imports here before the graph resumes;
+    failing scan rejects with 422 (`code_static_scan_failed`).
+    """
+
+    feedback: str | None = Field(default=None, max_length=_MAX_FEEDBACK_CHARS)
+    override_code: str | None = Field(default=None, max_length=_MAX_OVERRIDE_CONTENT_CHARS)
+
+
+@router.post(
+    "/analysis/approve-code",
+    response_model=WorkflowRun,
+    dependencies=[Depends(rate_limit("workflow.approve_code", max_per_window=30))],
+)
+async def approve_analysis_code(
+    project_id: UUID, payload: ApproveCodePayload, user: CurrentUser, db: DbSession
+) -> WorkflowRun:
+    """Approve (or override) the Analyst's proposed code, then run the sandbox."""
+    await _assert_project_owned(db, project_id, user.id)
+    run = await wf_svc.get_active_run(db, project_id)
+    if run is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "No active workflow run")
+
+    if payload.override_code:
+        # The same AST denylist that gates the LLM proposal also gates the
+        # user override. Defense in depth — the Docker container still
+        # enforces --network=none etc., but rejecting here keeps the audit
+        # log clean and surfaces the problem to the user immediately.
+        from app.agents.analyst import validate_user_override_code
+
+        scan = validate_user_override_code(payload.override_code)
+        if not scan.ok:
+            raise HTTPException(
+                status.HTTP_422_UNPROCESSABLE_CONTENT,
+                detail={
+                    "code": "code_static_scan_failed",
+                    "message": "Override code uses a denied or invalid import.",
+                    "denied": scan.denied,
+                    "error": scan.error,
+                },
+            )
+
+    return await wf_svc.approve_code_workflow(
+        db,
+        project_id=project_id,
+        run_id=run.id,
+        user_id=user.id,
+        feedback=payload.feedback,
+        override_code=payload.override_code,
+    )
+
+
+@router.post(
+    "/analysis/reject-code",
+    response_model=WorkflowRun,
+    dependencies=[Depends(rate_limit("workflow.reject_code", max_per_window=30))],
+)
+async def reject_analysis_code(
+    project_id: UUID, payload: FeedbackPayload, user: CurrentUser, db: DbSession
+) -> WorkflowRun:
+    """Reject the proposed code; the graph re-runs analyze_propose with feedback."""
+    await _assert_project_owned(db, project_id, user.id)
+    run = await wf_svc.get_active_run(db, project_id)
+    if run is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "No active workflow run")
+    if not payload.feedback:
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail={
+                "code": "feedback_required",
+                "message": "Feedback is required when rejecting analyst code.",
+            },
+        )
+    return await wf_svc.reject_code_workflow(
+        db,
+        project_id=project_id,
+        run_id=run.id,
+        user_id=user.id,
+        feedback=payload.feedback,
+    )
+
+
+@router.post(
+    "/analysis/approve-results",
+    response_model=WorkflowRun,
+    dependencies=[Depends(rate_limit("workflow.approve_results", max_per_window=30))],
+)
+async def approve_analysis_results(
+    project_id: UUID, payload: FeedbackPayload, user: CurrentUser, db: DbSession
+) -> WorkflowRun:
+    """Approve the executed results; graph advances to drafting."""
+    await _assert_project_owned(db, project_id, user.id)
+    run = await wf_svc.get_active_run(db, project_id)
+    if run is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "No active workflow run")
+    return await wf_svc.approve_results_workflow(
+        db,
+        project_id=project_id,
+        run_id=run.id,
+        user_id=user.id,
+        feedback=payload.feedback,
+    )
+
+
+@router.post(
+    "/analysis/reject-results",
+    response_model=WorkflowRun,
+    dependencies=[Depends(rate_limit("workflow.reject_results", max_per_window=30))],
+)
+async def reject_analysis_results(
+    project_id: UUID, payload: FeedbackPayload, user: CurrentUser, db: DbSession
+) -> WorkflowRun:
+    """Reject the executed results; graph re-runs analyze_propose."""
+    await _assert_project_owned(db, project_id, user.id)
+    run = await wf_svc.get_active_run(db, project_id)
+    if run is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "No active workflow run")
+    if not payload.feedback:
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail={
+                "code": "feedback_required",
+                "message": "Feedback is required when rejecting analyst results.",
+            },
+        )
+    return await wf_svc.reject_results_workflow(
+        db,
+        project_id=project_id,
+        run_id=run.id,
+        user_id=user.id,
+        feedback=payload.feedback,
+    )
+
+
 # NOTE: there is deliberately no GET /workflow/candidates endpoint.
 # The candidate/approved pool has a single source of truth — the `papers`
 # DB table, read via GET /projects/{id}/papers (SPEC §3.4) and toggled via

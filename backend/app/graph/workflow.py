@@ -27,7 +27,7 @@ import re
 import time
 from datetime import UTC, datetime
 from typing import Any, cast
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 from langgraph.graph import END, StateGraph
 from langgraph.types import interrupt
@@ -48,8 +48,13 @@ NODE_DISCOVER = "discover"
 NODE_AWAIT_POOL = "await_pool_approval"
 NODE_SYNTHESIZE = "synthesize"
 NODE_AWAIT_SYNTHESIS = "await_synthesis_approval"
-NODE_ANALYZE = "analyze"  # v0.2
-NODE_AWAIT_ANALYSIS = "await_analysis_approval"  # v0.2
+# Phase 3 (v0.2 — now active). Two HITL gates inside this phase: code review
+# (await_code_approval) before execution, and results review (await_analysis_
+# approval) after. The phase is opt-in by dataset presence.
+NODE_ANALYZE_PROPOSE = "analyze_propose"
+NODE_AWAIT_CODE = "await_code_approval"
+NODE_ANALYZE_EXECUTE = "analyze_execute"
+NODE_AWAIT_ANALYSIS = "await_analysis_approval"
 NODE_DRAFT = "draft_section"
 NODE_AWAIT_SECTION = "await_section_approval"
 NODE_ASSEMBLE = "assemble"
@@ -335,6 +340,255 @@ async def node_await_synthesis_approval(state: GraphState) -> GraphState:
 
     _log.info("gate_synthesis_approved", project_id=str(state.get("project_id")))
     return new_state
+
+
+# ---------------------------------------------------------------------------
+# Phase 3 — Analyst (Sandbox compute). Optional: the synthesis-approval gate
+# routes to analyze_propose only when state["datasets"] is non-empty. Two HITL
+# gates per BRD §10 / FR-2.3:
+#   1. await_code_approval — user reviews the generated code BEFORE execution
+#      (the BRD "code shown to user before execution" invariant).
+#   2. await_analysis_approval — user reviews the executed figures/log AFTER.
+# ---------------------------------------------------------------------------
+
+
+async def node_analyze_propose(state: GraphState) -> GraphState:
+    """Run the Analyst to propose code (no execution yet) + methods narrative.
+
+    Reads state["datasets"] (schema-only) and state["analyst_task"]; on a
+    reject re-run, state["last_feedback"] and the prior proposal's code are
+    threaded into the prompt so the LLM revises rather than starts from
+    scratch.
+
+    Output goes into state["code_proposal"] (dict-serialised so it survives
+    checkpointing). The static AST scan result (denied imports, unknown
+    imports, syntax errors) is part of the proposal so the gate UI surfaces
+    it before the user clicks approve.
+    """
+    from app.agents.analyst import Analyst, AnalystInput, DatasetRef
+
+    project_id = state.get("project_id")
+    if project_id is None:
+        _log.warning("analyze_propose_missing_project_id")
+        return {**state, "awaiting_approval": True, "code_proposal": None}
+
+    datasets_dicts = state.get("datasets") or []
+    refs: list[DatasetRef] = []
+    for d in datasets_dicts:
+        try:
+            refs.append(
+                DatasetRef(
+                    id=UUID(str(d.get("id"))),
+                    filename=str(d.get("filename", "data")),
+                    columns=list(d.get("columns") or []),
+                    rowcount=int(d.get("rowcount") or 0),
+                )
+            )
+        except (ValueError, TypeError) as exc:
+            _log.warning(
+                "analyze_propose_bad_dataset", error_type=type(exc).__name__, error=str(exc)
+            )
+
+    task = state.get("analyst_task") or "Produce a brief exploratory analysis."
+    feedback = state.get("last_feedback")
+    prior = state.get("code_proposal")
+    prior_code = str(prior.get("code", {}).get("content", "")) if isinstance(prior, dict) else None
+    if prior_code == "":
+        prior_code = None
+
+    payload = AnalystInput(
+        project_id=project_id,
+        task_description=task,
+        datasets=refs,
+        feedback=feedback,
+        prior_code=prior_code,
+    )
+
+    agent = Analyst()
+    output = await agent.run(payload)
+    proposal_dict = output.proposal.model_dump(mode="json")
+    usage_dict = output.usage.model_dump(mode="json")
+
+    _log.info(
+        "node_analyze_propose_done",
+        project_id=str(project_id),
+        scan_ok=output.proposal.scan.ok,
+        denied_count=len(output.proposal.scan.denied),
+    )
+    return {
+        **state,
+        "phase": Phase.ANALYSIS,
+        "code_proposal": proposal_dict,
+        "analyst_usage": usage_dict,
+        "awaiting_approval": True,
+        # Clear last_feedback so a subsequent gate doesn't double-consume it.
+        "last_feedback": None,
+    }
+
+
+async def node_await_code_approval(state: GraphState) -> GraphState:
+    """First Phase-3 HITL gate — user approves (or rejects/overrides) the code.
+
+    BRD §10 invariant: "user reviews code before execution." This gate is
+    non-optional once Phase 3 starts — there is no path from analyze_propose
+    to analyze_execute that bypasses it.
+
+    On override, ``state["last_override"]`` carries the user-edited code
+    (validated by the route layer via :func:`validate_user_override_code`
+    before it reaches us); the executor reads from there next.
+    """
+    _log.info("gate_code_approval_waiting", project_id=str(state.get("project_id")))
+
+    approval = interrupt(
+        {
+            "phase": Phase.ANALYSIS,
+            "gate": "code",
+            "message": "Review the proposed analysis code before execution.",
+        }
+    )
+
+    if approval != "approve":
+        if approval != "reject":
+            _log.warning(
+                "gate_code_unknown_resume",
+                project_id=str(state.get("project_id")),
+                value=str(approval)[:64],
+            )
+        _log.info("gate_code_rejected", project_id=str(state.get("project_id")))
+        return {**state, "awaiting_approval": False, "code_approval": "reject"}
+
+    return {**state, "awaiting_approval": False, "code_approval": "approve"}
+
+
+async def node_analyze_execute(state: GraphState) -> GraphState:
+    """Phase-3 sandbox execution — runs the approved code in Docker.
+
+    Sandbox unavailable (no Docker, sandbox_enabled=false, etc.) is treated
+    as a soft failure: the graph stores a log-only ``analyst_result`` with
+    a clear message and proceeds to the analysis gate, where the user can
+    reject + regenerate or override their way past it. We don't crash the
+    run on infrastructure issues — the audit trail still captures it.
+    """
+    from app.services import dataset_storage
+    from app.services.sandbox import SandboxUnavailableError, run_in_sandbox
+
+    project_id = state.get("project_id")
+    proposal = state.get("code_proposal") or {}
+    override = state.get("last_override")
+    code_artifact = (
+        override
+        if isinstance(override, dict) and override.get("kind") == "code"
+        else proposal.get("code", {})
+        if isinstance(proposal, dict)
+        else {}
+    )
+    code_text = str(code_artifact.get("content", "")) if isinstance(code_artifact, dict) else ""
+
+    # Load dataset bytes via the storage adapter. Failures are non-fatal —
+    # the sandbox still runs against an empty /work/datasets/ dir.
+    datasets_payload: dict[str, bytes] = {}
+    for d in state.get("datasets") or []:
+        try:
+            datasets_payload[str(d.get("filename", "data"))] = dataset_storage.read_bytes(
+                str(d.get("storage_uri", ""))
+            )
+        except Exception as exc:
+            _log.warning(
+                "analyze_execute_dataset_read_failed",
+                filename=str(d.get("filename")),
+                error_type=type(exc).__name__,
+            )
+
+    try:
+        result = await run_in_sandbox(code_text, datasets=datasets_payload)
+        result_dict: dict[str, Any] = result.model_dump(mode="json")
+        # Pydantic serialises bytes as base64 — pull figures out separately
+        # so the audit/log payload stays small and the result blob carries
+        # just the count + sizes for the gate UI.
+        figures = result.figures
+        result_dict["figures"] = [{"index": i, "bytes": len(b)} for i, b in enumerate(figures)]
+        # Keep the raw figure bytes around in state under a separate key —
+        # this is what the post-gate persistence layer reads into Artifact
+        # rows.  Base64-encode so the dict survives msgpack checkpointing.
+        import base64
+
+        result_dict["figures_b64"] = [base64.b64encode(b).decode() for b in figures]
+    except SandboxUnavailableError as exc:
+        _log.warning(
+            "analyze_execute_sandbox_unavailable",
+            project_id=str(project_id),
+            error_type=type(exc).__name__,
+        )
+        result_dict = {
+            "exit_code": -1,
+            "stdout": "",
+            "stderr": f"[sandbox unavailable: {exc}]\n",
+            "figures": [],
+            "figures_b64": [],
+            "duration_ms": 0,
+            "timed_out": False,
+            "oomed": False,
+        }
+    except Exception as exc:
+        _log.warning(
+            "analyze_execute_unexpected",
+            project_id=str(project_id),
+            error_type=type(exc).__name__,
+            error=str(exc),
+        )
+        result_dict = {
+            "exit_code": -1,
+            "stdout": "",
+            "stderr": f"[sandbox crashed: {type(exc).__name__}: {exc}]\n",
+            "figures": [],
+            "figures_b64": [],
+            "duration_ms": 0,
+            "timed_out": False,
+            "oomed": False,
+        }
+
+    _log.info(
+        "node_analyze_execute_done",
+        project_id=str(project_id),
+        exit_code=result_dict.get("exit_code"),
+        figures_n=len(result_dict.get("figures_b64") or []),
+    )
+    return {
+        **state,
+        "analyst_result": result_dict,
+        "awaiting_approval": True,
+        # Clear the override so a later gate doesn't replay it.
+        "last_override": None,
+    }
+
+
+async def node_await_analysis_approval(state: GraphState) -> GraphState:
+    """Second Phase-3 HITL gate — user reviews executed results.
+
+    On approve: graph advances to draft_section.
+    On reject:  graph re-runs analyze_propose (with feedback in state).
+    """
+    _log.info("gate_analysis_approval_waiting", project_id=str(state.get("project_id")))
+
+    approval = interrupt(
+        {
+            "phase": Phase.ANALYSIS,
+            "gate": "results",
+            "message": "Review the executed analysis results.",
+        }
+    )
+
+    if approval != "approve":
+        if approval != "reject":
+            _log.warning(
+                "gate_analysis_unknown_resume",
+                project_id=str(state.get("project_id")),
+                value=str(approval)[:64],
+            )
+        _log.info("gate_analysis_rejected", project_id=str(state.get("project_id")))
+        return {**state, "awaiting_approval": False, "analysis_approval": "reject"}
+
+    return {**state, "awaiting_approval": False, "analysis_approval": "approve"}
 
 
 # Canonical seven-section order — BRD §5.2 FR-2.4. The graph drafts these in
@@ -749,11 +1003,40 @@ def _route_after_pool(state: GraphState) -> str:
 def _route_after_synthesis(state: GraphState) -> str:
     """After the synthesis gate, decide where to go.
 
-    If rejected, loop back to `synthesize` (re-runs the Critic with feedback).
-    Otherwise advance to drafting. Phase 3 (analyze) is out of MVP scope.
+    - reject  → re-run synthesize (with feedback).
+    - approve + has datasets → Phase 3 (analyze_propose).
+    - approve + no datasets → straight to Phase 4 (draft_section).
+
+    Phase 3 is opt-in by dataset presence — a project without an uploaded
+    dataset goes from synthesis directly to drafting (BRD §8: Phase 3 was
+    always v0.2 scope and remains optional inside it).
     """
     if state.get("synthesis_approval") == "reject":
         return NODE_SYNTHESIZE
+    if state.get("datasets"):
+        return NODE_ANALYZE_PROPOSE
+    return NODE_DRAFT
+
+
+def _route_after_code(state: GraphState) -> str:
+    """After the code-approval gate.
+
+    - reject → re-run analyze_propose with feedback (regen path).
+    - approve → analyze_execute (run the code in the sandbox).
+    """
+    if state.get("code_approval") == "reject":
+        return NODE_ANALYZE_PROPOSE
+    return NODE_ANALYZE_EXECUTE
+
+
+def _route_after_analysis(state: GraphState) -> str:
+    """After the analysis (post-execution) gate.
+
+    - reject → re-run analyze_propose (give the LLM another shot).
+    - approve → draft_section (advance to Phase 4).
+    """
+    if state.get("analysis_approval") == "reject":
+        return NODE_ANALYZE_PROPOSE
     return NODE_DRAFT
 
 
@@ -794,6 +1077,11 @@ def build_graph(checkpointer: Any) -> Any:
     g.add_node(NODE_AWAIT_POOL, node_await_pool_approval)
     g.add_node(NODE_SYNTHESIZE, node_synthesize)
     g.add_node(NODE_AWAIT_SYNTHESIS, node_await_synthesis_approval)
+    # Phase 3 — Analyst nodes (skipped at runtime when state.datasets is empty).
+    g.add_node(NODE_ANALYZE_PROPOSE, node_analyze_propose)
+    g.add_node(NODE_AWAIT_CODE, node_await_code_approval)
+    g.add_node(NODE_ANALYZE_EXECUTE, node_analyze_execute)
+    g.add_node(NODE_AWAIT_ANALYSIS, node_await_analysis_approval)
     g.add_node(NODE_DRAFT, node_draft_section)
     g.add_node(NODE_AWAIT_SECTION, node_await_section_approval)
     g.add_node(NODE_ASSEMBLE, node_assemble)
@@ -814,11 +1102,36 @@ def build_graph(checkpointer: Any) -> Any:
     # synthesize → await_synthesis_approval (always)
     g.add_edge(NODE_SYNTHESIZE, NODE_AWAIT_SYNTHESIS)
 
-    # await_synthesis_approval → draft_section or back to synthesize
+    # await_synthesis_approval → draft_section OR analyze_propose (has_dataset) OR back to synthesize
     g.add_conditional_edges(
         NODE_AWAIT_SYNTHESIS,
         _route_after_synthesis,
-        {NODE_SYNTHESIZE: NODE_SYNTHESIZE, NODE_DRAFT: NODE_DRAFT},
+        {
+            NODE_SYNTHESIZE: NODE_SYNTHESIZE,
+            NODE_DRAFT: NODE_DRAFT,
+            NODE_ANALYZE_PROPOSE: NODE_ANALYZE_PROPOSE,
+        },
+    )
+
+    # Phase 3 — code/results gates routed by approve/reject. Both reject
+    # paths loop back to analyze_propose (regenerate-with-feedback).
+    g.add_edge(NODE_ANALYZE_PROPOSE, NODE_AWAIT_CODE)
+    g.add_conditional_edges(
+        NODE_AWAIT_CODE,
+        _route_after_code,
+        {
+            NODE_ANALYZE_EXECUTE: NODE_ANALYZE_EXECUTE,
+            NODE_ANALYZE_PROPOSE: NODE_ANALYZE_PROPOSE,
+        },
+    )
+    g.add_edge(NODE_ANALYZE_EXECUTE, NODE_AWAIT_ANALYSIS)
+    g.add_conditional_edges(
+        NODE_AWAIT_ANALYSIS,
+        _route_after_analysis,
+        {
+            NODE_DRAFT: NODE_DRAFT,
+            NODE_ANALYZE_PROPOSE: NODE_ANALYZE_PROPOSE,
+        },
     )
 
     # draft_section → await_section_approval (gate)

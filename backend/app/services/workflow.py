@@ -25,7 +25,13 @@ from typing_extensions import TypedDict
 
 from app.db.session import flush_for_background_dispatch
 from app.graph.state import GraphState
-from app.graph.workflow import NODE_AWAIT_SECTION, NODE_AWAIT_SYNTHESIS, build_graph
+from app.graph.workflow import (
+    NODE_AWAIT_ANALYSIS,
+    NODE_AWAIT_CODE,
+    NODE_AWAIT_SECTION,
+    NODE_AWAIT_SYNTHESIS,
+    build_graph,
+)
 from app.models.db import ArtifactRow, AuditLogRow, PaperRow, ProjectRow, WorkflowRunRow
 from app.models.schemas import VALID_RUN_STATES, Paper, Phase, WorkflowRun
 from app.utils.logging import get_logger
@@ -440,6 +446,37 @@ async def start_workflow(
         .values(status="active", updated_at=now)
     )
 
+    # Hydrate Phase-3 inputs: any datasets the user uploaded for this
+    # project (FR-2.3, Sprint 1) flow into the graph state up front so
+    # the synthesis gate can route into Phase 3 on approve. Empty list →
+    # graph skips Phase 3 entirely (the dataset-presence predicate in
+    # `_route_after_synthesis`).
+    from app.models.db import DatasetRow
+
+    dataset_rows = (
+        (
+            await session.execute(
+                select(DatasetRow)
+                .where(DatasetRow.project_id == project_id)
+                .order_by(DatasetRow.uploaded_at.asc())
+            )
+        )
+        .scalars()
+        .all()
+    )
+    datasets_payload: list[dict[str, Any]] = [
+        {
+            "id": str(d.id),
+            "filename": d.filename,
+            "storage_uri": d.storage_uri,
+            "columns": list(d.columns),
+            "rowcount": d.rowcount,
+            "bytes": d.bytes,
+        }
+        for d in dataset_rows
+    ]
+    analyst_task = project.title  # default: project title as the analysis task
+
     # Make the WorkflowRunRow visible to _run_graph's fresh session before
     # we hand off. Named helper instead of bare session.commit() — see
     # app/db/session.py docstring for the contract (audit round-3, MED-2).
@@ -447,7 +484,15 @@ async def start_workflow(
 
     # Dispatch the graph in the background so the HTTP response returns quickly.
     # Keep a strong reference to prevent the task being GC'd before completion.
-    task = asyncio.create_task(_run_graph(run.id, project_id, project.seed_query))
+    task = asyncio.create_task(
+        _run_graph(
+            run.id,
+            project_id,
+            project.seed_query,
+            datasets=datasets_payload,
+            analyst_task=analyst_task,
+        )
+    )
     _background_tasks.add(task)
     task.add_done_callback(_background_tasks.discard)
 
@@ -458,8 +503,17 @@ async def _run_graph(
     run_id: UUID,
     project_id: UUID,
     seed_query: str,
+    *,
+    datasets: list[dict[str, Any]] | None = None,
+    analyst_task: str | None = None,
 ) -> None:
-    """Execute the graph for the given run. Runs as a background task."""
+    """Execute the graph for the given run. Runs as a background task.
+
+    `datasets` is a list of dict-serialised DatasetRow rows (id, filename,
+    storage_uri, columns, rowcount, bytes). When non-empty the synthesis
+    gate routes into Phase 3 — see :func:`_route_after_synthesis`. Empty
+    list skips Phase 3 entirely (BRD §8: Phase 3 is opt-in).
+    """
     graph = get_compiled_graph()
     config = {"configurable": {"thread_id": str(run_id)}}
     initial_state: GraphState = {
@@ -469,6 +523,8 @@ async def _run_graph(
         "phase": Phase.DISCOVERY,
         "candidates": [],
         "approved_pool": [],
+        "datasets": datasets or [],
+        "analyst_task": analyst_task,
         "awaiting_approval": False,
         "last_feedback": None,
         "last_override": None,
@@ -1129,6 +1185,12 @@ async def _resume_graph(
             await _handle_section_gate_pause(project_id, run_id, snapshot, get_session)
             return
 
+        if snapshot.next and snapshot.next[0] in (NODE_AWAIT_CODE, NODE_AWAIT_ANALYSIS):
+            # Phase 3 — paused at either the code-approval gate
+            # (post-propose) or the results gate (post-execute).
+            await _handle_analysis_gate_pause(project_id, run_id, snapshot, get_session)
+            return
+
         if snapshot.next:
             # Graph paused at a Phase 1 gate again (e.g. after a reject re-runs
             # discover). Phase 2 and Phase 4 gates are handled by the branches
@@ -1428,6 +1490,354 @@ async def _handle_section_gate_pause(
             "summary": f"The {section} section is ready for your review.",
         },
     )
+
+
+async def _handle_analysis_gate_pause(
+    project_id: UUID,
+    run_id: UUID,
+    snapshot: Any,
+    get_session: Any,
+) -> None:
+    """Re-arm one of the two Phase-3 HITL gates.
+
+    Distinguishes which gate by inspecting ``snapshot.next`` — the graph
+    parks at ``NODE_AWAIT_CODE`` right after :func:`node_analyze_propose`
+    and at ``NODE_AWAIT_ANALYSIS`` right after :func:`node_analyze_execute`.
+
+    Both gates set ``run.phase = analysis`` (per the BRD §8 phase machine —
+    Phase 3 has two sub-gates inside a single canonical Phase). The
+    distinguishing event field is ``gate: "code" | "results"`` so the
+    frontend knows which review UI to show.
+    """
+    values = snapshot.values
+    gate_node = snapshot.next[0] if snapshot.next else NODE_AWAIT_CODE
+    gate_kind = "code" if gate_node == NODE_AWAIT_CODE else "results"
+
+    # Token rollup for the Analyst's most recent proposal call.
+    usage: dict[str, Any] = values.get("analyst_usage") or {}
+
+    capped = False
+    async with get_session() as bg_session:
+        await _update_run_state(bg_session, run_id, "awaiting_approval", Phase.ANALYSIS)
+
+        if gate_kind == "code":
+            proposal = values.get("code_proposal") or {}
+            code_artifact = proposal.get("code") if isinstance(proposal, dict) else None
+            scan = proposal.get("scan") if isinstance(proposal, dict) else {}
+            # Persist the code artifact so the GET /artifacts endpoint can return it.
+            if isinstance(code_artifact, dict) and code_artifact.get("id"):
+                await _persist_artifacts(bg_session, project_id, run_id, [code_artifact])
+            await _write_audit(
+                bg_session,
+                project_id=project_id,
+                workflow_run_id=run_id,
+                actor="system",
+                action="analysis.code_proposed",
+                payload={
+                    "artifact_id": str(code_artifact.get("id")) if code_artifact else None,
+                    "scan_ok": bool(scan.get("ok")) if isinstance(scan, dict) else None,
+                    "denied_imports": (
+                        list(scan.get("denied") or []) if isinstance(scan, dict) else []
+                    ),
+                    "unknown_imports": (
+                        list(scan.get("unknown") or []) if isinstance(scan, dict) else []
+                    ),
+                },
+            )
+        else:
+            # gate_kind == "results"
+            result = values.get("analyst_result") or {}
+            await _write_audit(
+                bg_session,
+                project_id=project_id,
+                workflow_run_id=run_id,
+                actor="system",
+                action="analysis.code_executed",
+                payload={
+                    "exit_code": result.get("exit_code"),
+                    "duration_ms": result.get("duration_ms"),
+                    "timed_out": bool(result.get("timed_out")),
+                    "oomed": bool(result.get("oomed")),
+                    "figures_n": len(result.get("figures_b64") or []),
+                    "stdout_bytes": len(str(result.get("stdout") or "")),
+                    "stderr_bytes": len(str(result.get("stderr") or "")),
+                },
+            )
+
+        # Audit the Analyst's LLM usage so the per-project cost cap sees Phase-3 spend.
+        if usage and gate_kind == "code":
+            await _write_audit(
+                bg_session,
+                project_id=project_id,
+                workflow_run_id=run_id,
+                actor="analyst",
+                action="agent.invoke",
+                payload={
+                    "agent": "analyst",
+                    "llm_calls": usage.get("llm_calls", 0),
+                },
+                model=usage.get("model"),
+                tokens_in=usage.get("tokens_in"),
+                tokens_out=usage.get("tokens_out"),
+                cost_usd=usage.get("cost_usd"),
+            )
+        capped = await _enforce_cost_cap(bg_session, project_id, run_id)
+        if capped:
+            await _update_run_state(bg_session, run_id, "error")
+
+    await _emit(
+        project_id,
+        {
+            "type": "agent.completed",
+            "agent": "analyst",
+            "run_id": str(run_id),
+            "artifact_ids": [],
+        },
+    )
+    if capped:
+        return
+    summary = (
+        "Review the proposed analysis code before execution."
+        if gate_kind == "code"
+        else "Review the executed analysis results."
+    )
+    await _emit(
+        project_id,
+        {
+            "type": "approval.required",
+            "phase": Phase.ANALYSIS.value,
+            "gate": gate_kind,
+            "run_id": str(run_id),
+            "summary": summary,
+        },
+    )
+
+
+# ---------------------------------------------------------------------------
+# Phase 3 — approve/reject for the two analysis gates (SPEC v0.3 §3.3).
+# Dedicated functions instead of overloading approve_workflow because:
+#   1. The audit-action names are distinct (analysis.code_approved vs
+#      analysis.results_approved) — separate handlers make the trail
+#      unambiguous.
+#   2. Code-approval can carry an `override_code` string the route layer
+#      validates against the AST denylist BEFORE we resume the graph.
+# ---------------------------------------------------------------------------
+
+
+async def approve_code_workflow(
+    session: AsyncSession,
+    project_id: UUID,
+    run_id: UUID,
+    user_id: UUID,
+    *,
+    feedback: str | None = None,
+    override_code: str | None = None,
+) -> WorkflowRun:
+    """Approve the proposed Phase-3 code.
+
+    If ``override_code`` is supplied, replace the LLM-proposed code with
+    the user's edit (still scanned for denied imports by the route layer
+    before we get here). The override is recorded as a distinct audit
+    row (action="analysis.code_overridden") so the trail is loud.
+    """
+    run = await _assert_awaiting(session, run_id)
+    if run.phase != Phase.ANALYSIS.value:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            detail={
+                "code": "phase_locked",
+                "message": f"Run is in phase '{run.phase}', expected 'analysis'.",
+            },
+        )
+
+    payload: dict[str, Any] = {"user_id": str(user_id), "feedback": feedback}
+    resume_update: dict[str, Any] = {}
+    if override_code:
+        now = datetime.now(tz=UTC)
+        artifact_state: dict[str, Any] = {
+            "id": str(uuid4()),
+            "project_id": str(project_id),
+            "kind": "code",
+            "label": "analyst-override",
+            "content": override_code,
+            "mime_type": "text/x-python",
+            "produced_by": "human",
+            "created_at": now.isoformat(),
+        }
+        resume_update["last_override"] = artifact_state
+        payload["override_artifact_id"] = artifact_state["id"]
+        payload["override_bytes"] = len(override_code.encode())
+        await _write_audit(
+            session,
+            project_id=project_id,
+            workflow_run_id=run_id,
+            actor="user",
+            action="analysis.code_overridden",
+            payload=payload,
+        )
+
+    await _write_audit(
+        session,
+        project_id=project_id,
+        workflow_run_id=run_id,
+        actor="user",
+        action="analysis.code_approved",
+        payload=payload,
+    )
+    await _update_run_state(session, run_id, "running", Phase.ANALYSIS)
+    await flush_for_background_dispatch(session)
+
+    graph = get_compiled_graph()
+    config = {"configurable": {"thread_id": str(run_id)}}
+    task = asyncio.create_task(
+        _resume_graph(
+            project_id,
+            run_id,
+            graph,
+            config,
+            Command(resume="approve", update=resume_update),
+            done_state="running",
+        )
+    )
+    _background_tasks.add(task)
+    task.add_done_callback(_background_tasks.discard)
+    return _run_to_schema(run)
+
+
+async def reject_code_workflow(
+    session: AsyncSession,
+    project_id: UUID,
+    run_id: UUID,
+    user_id: UUID,
+    feedback: str,
+) -> WorkflowRun:
+    """Reject the proposed Phase-3 code — loops back to analyze_propose."""
+    run = await _assert_awaiting(session, run_id)
+    if run.phase != Phase.ANALYSIS.value:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            detail={
+                "code": "phase_locked",
+                "message": f"Run is in phase '{run.phase}', expected 'analysis'.",
+            },
+        )
+    await _write_audit(
+        session,
+        project_id=project_id,
+        workflow_run_id=run_id,
+        actor="user",
+        action="analysis.code_rejected",
+        payload={"user_id": str(user_id), "feedback": feedback},
+    )
+    await _update_run_state(session, run_id, "running", Phase.ANALYSIS)
+    await flush_for_background_dispatch(session)
+
+    graph = get_compiled_graph()
+    config = {"configurable": {"thread_id": str(run_id)}}
+    task = asyncio.create_task(
+        _resume_graph(
+            project_id,
+            run_id,
+            graph,
+            config,
+            Command(resume="reject", update={"last_feedback": feedback}),
+            done_state="running",
+        )
+    )
+    _background_tasks.add(task)
+    task.add_done_callback(_background_tasks.discard)
+    return _run_to_schema(run)
+
+
+async def approve_results_workflow(
+    session: AsyncSession,
+    project_id: UUID,
+    run_id: UUID,
+    user_id: UUID,
+    *,
+    feedback: str | None = None,
+) -> WorkflowRun:
+    """Approve the executed Phase-3 results — graph advances to drafting."""
+    run = await _assert_awaiting(session, run_id)
+    if run.phase != Phase.ANALYSIS.value:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            detail={
+                "code": "phase_locked",
+                "message": f"Run is in phase '{run.phase}', expected 'analysis'.",
+            },
+        )
+    await _write_audit(
+        session,
+        project_id=project_id,
+        workflow_run_id=run_id,
+        actor="user",
+        action="analysis.results_approved",
+        payload={"user_id": str(user_id), "feedback": feedback},
+    )
+    await _update_run_state(session, run_id, "running", Phase.DRAFTING)
+    await flush_for_background_dispatch(session)
+
+    graph = get_compiled_graph()
+    config = {"configurable": {"thread_id": str(run_id)}}
+    task = asyncio.create_task(
+        _resume_graph(
+            project_id,
+            run_id,
+            graph,
+            config,
+            Command(resume="approve"),
+            done_state="running",
+        )
+    )
+    _background_tasks.add(task)
+    task.add_done_callback(_background_tasks.discard)
+    return _run_to_schema(run)
+
+
+async def reject_results_workflow(
+    session: AsyncSession,
+    project_id: UUID,
+    run_id: UUID,
+    user_id: UUID,
+    feedback: str,
+) -> WorkflowRun:
+    """Reject Phase-3 results — graph re-runs analyze_propose."""
+    run = await _assert_awaiting(session, run_id)
+    if run.phase != Phase.ANALYSIS.value:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            detail={
+                "code": "phase_locked",
+                "message": f"Run is in phase '{run.phase}', expected 'analysis'.",
+            },
+        )
+    await _write_audit(
+        session,
+        project_id=project_id,
+        workflow_run_id=run_id,
+        actor="user",
+        action="analysis.results_rejected",
+        payload={"user_id": str(user_id), "feedback": feedback},
+    )
+    await _update_run_state(session, run_id, "running", Phase.ANALYSIS)
+    await flush_for_background_dispatch(session)
+
+    graph = get_compiled_graph()
+    config = {"configurable": {"thread_id": str(run_id)}}
+    task = asyncio.create_task(
+        _resume_graph(
+            project_id,
+            run_id,
+            graph,
+            config,
+            Command(resume="reject", update={"last_feedback": feedback}),
+            done_state="running",
+        )
+    )
+    _background_tasks.add(task)
+    task.add_done_callback(_background_tasks.discard)
+    return _run_to_schema(run)
 
 
 def _run_to_schema(run: WorkflowRunRow) -> WorkflowRun:

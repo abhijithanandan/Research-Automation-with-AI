@@ -42,6 +42,26 @@ class GraphState(TypedDict, total=False):
     # Token/cost rollup for the Critic run — written to audit_log (BRD FR-3.3).
     synthesis_usage: dict[str, Any] | None
 
+    # Phase 3 — Analyst / Sandbox compute (SPEC v0.3 §6.3).
+    # Hydrated by services.workflow.start_workflow from DatasetRow rows when
+    # the user has uploaded any. Empty list means the graph routes from the
+    # synthesis gate straight to drafting — Phase 3 is optional.
+    datasets: list[dict[str, Any]]
+    # Free-text task the user provided alongside the dataset upload. The
+    # Analyst's prompt template stamps this verbatim into <task>...</task>.
+    analyst_task: str | None
+    # The Analyst's proposal (code + methods narrative) — the dict is what
+    # the await_code_approval gate surfaces to the user.
+    code_proposal: dict[str, Any] | None
+    # Set by approve_code_workflow / reject_code_workflow on the resume Command.
+    code_approval: str | None
+    # The SandboxResult after analyze_execute. Surfaced at await_analysis_approval.
+    analyst_result: dict[str, Any] | None
+    # Set by approve_results_workflow / reject_results_workflow on the resume Command.
+    analysis_approval: str | None
+    # Token/cost rollup for the Analyst run — written to audit_log.
+    analyst_usage: dict[str, Any] | None
+
     # Phase 4 — Scribe / drafting
     sections_done: list[str]
     sections_remaining: list[str]

@@ -29,7 +29,11 @@ from langgraph.types import Command
 from app.agents.librarian import LibrarianOutput
 from app.graph.state import GraphState
 from app.graph.workflow import (
+    NODE_ANALYZE_EXECUTE,
+    NODE_ANALYZE_PROPOSE,
     NODE_ASSEMBLE,
+    NODE_AWAIT_ANALYSIS,
+    NODE_AWAIT_CODE,
     NODE_AWAIT_POOL,
     NODE_AWAIT_SECTION,
     NODE_AWAIT_SYNTHESIS,
@@ -501,6 +505,11 @@ def test_graph_registers_exactly_the_expected_nodes() -> None:
         NODE_AWAIT_POOL,
         NODE_SYNTHESIZE,
         NODE_AWAIT_SYNTHESIS,
+        # Phase 3 — optional, opt-in by dataset presence (Sprint 4).
+        NODE_ANALYZE_PROPOSE,
+        NODE_AWAIT_CODE,
+        NODE_ANALYZE_EXECUTE,
+        NODE_AWAIT_ANALYSIS,
         NODE_DRAFT,
         NODE_AWAIT_SECTION,
         NODE_ASSEMBLE,
