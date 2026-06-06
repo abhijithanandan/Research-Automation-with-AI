@@ -19,6 +19,8 @@ from collections.abc import AsyncIterator
 from datetime import UTC, datetime
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
+from urllib.parse import urlparse
+from urllib.request import url2pathname
 from uuid import uuid4
 
 import pytest
@@ -161,8 +163,12 @@ def test_delete_removes_file(monkeypatch: pytest.MonkeyPatch) -> None:
     with tempfile.TemporaryDirectory() as tmp:
         monkeypatch.setattr(settings, "data_dir", tmp)
         stored = dataset_storage.store(uuid4(), uuid4(), "d.csv", b"a\n1\n")
-        # File present
-        path = Path(stored.storage_uri.replace("file://", ""))
+        # File present. Parse the file:// URI the SAME cross-platform way the
+        # service does (url2pathname strips the spurious leading slash before
+        # a Windows drive letter; no-op on POSIX). A naive
+        # .replace("file://", "") yielded an invalid "\\C:\\Users\\..." on
+        # Windows.
+        path = Path(url2pathname(urlparse(stored.storage_uri).path))
         assert path.exists()
         dataset_storage.delete(stored.storage_uri)
         assert not path.exists()

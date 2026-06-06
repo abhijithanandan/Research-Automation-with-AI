@@ -24,10 +24,23 @@ import io
 import json
 from dataclasses import dataclass
 from pathlib import Path
-from urllib.parse import unquote, urlparse
+from urllib.parse import urlparse
+from urllib.request import url2pathname
 from uuid import UUID
 
 from app.config import get_settings
+
+
+def _uri_to_path(storage_uri: str) -> Path:
+    """Convert a ``file://`` URI back to a filesystem Path, cross-platform.
+
+    `urlparse("file:///C:/x").path` is `/C:/x`; feeding that straight to
+    `Path(...)` on Windows yields an invalid `\\C:\\x` (WinError 123). The
+    stdlib `url2pathname` strips the spurious leading slash before the drive
+    letter on Windows and is a no-op on POSIX, so it round-trips the URIs
+    `store()` produced via `Path(...).as_uri()` on either OS.
+    """
+    return Path(url2pathname(urlparse(storage_uri).path))
 
 
 class DatasetTooLargeError(Exception):
@@ -228,8 +241,7 @@ def read_bytes(storage_uri: str) -> bytes:
     parsed = urlparse(storage_uri)
     if parsed.scheme != "file":
         raise NotImplementedError(f"Storage scheme {parsed.scheme!r} is not supported in dev.")
-    path = Path(unquote(parsed.path))
-    return path.read_bytes()
+    return _uri_to_path(storage_uri).read_bytes()
 
 
 def delete(storage_uri: str) -> None:
@@ -237,7 +249,7 @@ def delete(storage_uri: str) -> None:
     parsed = urlparse(storage_uri)
     if parsed.scheme != "file":
         return  # prod adapter will overwrite this with a real implementation
-    path = Path(unquote(parsed.path))
+    path = _uri_to_path(storage_uri)
     try:
         path.unlink()
         # Also remove the per-dataset dir if empty (per-project dir stays).
