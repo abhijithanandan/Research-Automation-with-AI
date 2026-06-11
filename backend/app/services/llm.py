@@ -17,12 +17,32 @@ import asyncio
 from collections.abc import AsyncIterator
 from typing import Any, Protocol
 
+import httpx
 from google import genai
+from tenacity import (
+    retry,
+    retry_if_exception_type,
+    stop_after_attempt,
+    wait_exponential,
+)
 
 from app.config import get_settings
 from app.utils.logging import get_logger
 
 _log = get_logger(__name__)
+
+# Transient transport failures worth retrying. A single dropped connection to
+# the LLM provider used to kill an entire multi-phase workflow run (observed:
+# httpx.ConnectError "[Errno 111] Connection refused" mid-Scribe at Phase 4,
+# discarding all the Phase 1-2 work). These are network-layer, not auth or
+# validation, so retrying is safe — an invalid key or a 400 still fails fast.
+_TRANSIENT_LLM_ERRORS: tuple[type[Exception], ...] = (
+    httpx.ConnectError,
+    httpx.ConnectTimeout,
+    httpx.ReadTimeout,
+    httpx.RemoteProtocolError,
+    httpx.PoolTimeout,
+)
 
 
 class LLMProvider(Protocol):
@@ -309,13 +329,36 @@ class LLMGateway:
         """The active model identifier — written to audit_log (BRD FR-3.3)."""
         return self._model_name
 
+    @retry(
+        retry=retry_if_exception_type(_TRANSIENT_LLM_ERRORS),
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=1, min=1, max=8),
+        reraise=True,
+    )
+    async def _complete_with_retry(self, prompt: str, **kwargs: object) -> str:
+        """Provider call wrapped in a bounded retry on transient transport
+        errors only. 3 attempts, exponential backoff (1s → 2s → 4s, cap 8s).
+        Auth / validation / quota errors are NOT in _TRANSIENT_LLM_ERRORS, so
+        they propagate on the first attempt (fail-fast). reraise=True surfaces
+        the original exception (not tenacity's RetryError) so the caller's
+        graph-resume error handler sees the real ConnectError."""
+        try:
+            return await self._provider.complete(prompt, **kwargs)
+        except _TRANSIENT_LLM_ERRORS as exc:
+            _log.warning(
+                "llm_transient_error_retrying",
+                error_type=type(exc).__name__,
+                model=self._model_name,
+            )
+            raise
+
     async def complete(self, prompt: str, **kwargs: object) -> tuple[str, dict[str, object]]:
         """Complete a prompt. Returns (text, telemetry_dict).
 
         Callers must write the telemetry to audit_log — see agents/*.py.
         """
         _log.debug("llm_complete_start", prompt_len=len(prompt))
-        text = await self._provider.complete(prompt, **kwargs)
+        text = await self._complete_with_retry(prompt, **kwargs)
 
         # Prefer exact token counts from the provider when available. Both the
         # Anthropic and Gemini providers stash real counts on `last_usage`
