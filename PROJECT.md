@@ -180,6 +180,41 @@ paragraph methods narrative to the user for approval (gate 2).
   wall-clock kill, 64 KiB stdout/stderr cap, EXIF stripping on figures before
   serving back.
 
+#### What attaching a dataset actually does (operator view)
+
+Phase 3 is **opt-in by dataset presence** — the only thing that turns it on is
+attaching a dataset on the setup screen before you click "Begin discovery".
+The dataset should be **your own data that you want analyzed and turned into
+figures** for the paper — not a reference dataset cited from someone else's
+work. End-to-end, here is what happens to that file:
+
+1. **Upload → schema only.** The CSV is stored and its schema is extracted
+   (filename, column names, row count → `DatasetRef`, `analyst.py:161`). The
+   **raw bytes never go to the LLM** — only the schema is interpolated into the
+   prompt (`_render_prompt`, `analyst.py:365`). This keeps your data out of the
+   model provider and keeps token cost flat regardless of file size.
+2. **`analyze_propose`.** The LLM writes a Python *script* (not answers) that
+   would analyze the data; a static AST scan rejects dangerous imports before
+   you ever see it (`_DENY_IMPORTS`, `analyst.py:52`).
+3. **Gate 1 — `await_code_approval`.** You read the proposed Python and
+   approve / reject / override. Nothing executes until a human approves.
+4. **`analyze_execute`.** Only on approval are the dataset bytes copied to
+   `/work/datasets/<filename>` inside a throwaway container with `--network=none`
+   (no exfiltration), read-only root, non-root user, capability drop, and
+   CPU/memory/PID/wall-clock limits (`sandbox.py:160-176`). Figures land in
+   `/work/figures/*.png`; stdout is captured (64 KiB cap).
+5. **Gate 2 — `await_analysis_approval`.** You review the figures + log and
+   approve / reject.
+6. **Into the manuscript.** Approved figures become artifacts and the Analyst's
+   2-3 sentence methods narrative is woven into the **Methodology** section by
+   the Scribe.
+
+**Impact vs. no dataset:** without one, the run goes synthesis → drafting
+directly (2 HITL gates, no Docker needed). With one, you get a real
+data-analysis phase, **4 HITL gates**, computed figures in the methodology — and
+a hard dependency on a running **Docker daemon** (absent → `SandboxUnavailableError`,
+surfaced as "sandbox not configured", a graceful skip rather than a crash).
+
 ### Scribe (Phase 4)
 
 Per-section drafting in canonical order (abstract → introduction →
@@ -305,6 +340,33 @@ the schema level (a curl call cannot bypass the frontend's required-field).
                   | Saver, same DB) |
                   +-----------------+
 ```
+
+**Editable diagrams** — a native draw.io source lives at
+[`docs/architecture.drawio`](docs/architecture.drawio) with two pages:
+
+1. **System Topology** — local client ↔ remote engine ↔ data stores, with the
+   real transport edges (HTTPS / WSS / checkpoints / RAG query / token verify /
+   inference).
+2. **LangGraph State Machine** — all 12 workflow nodes from
+   `backend/app/graph/workflow.py`, the four HITL `interrupt()` gates, the
+   reject/loop edges, and the dataset-gated **"approve + no dataset → skip
+   Phase 3"** branch.
+
+Both pages are verified against source: the 12 node names match the
+`NODE_*` constants (`workflow.py:47-61`), and every conditional edge matches
+the `_route_after_*` routers (`workflow.py:990-1050`) — including the
+`_route_after_synthesis` three-way branch (reject → re-synthesize; approve +
+datasets → `analyze_propose`; approve + no datasets → `draft_section`). The
+topology's "30+ endpoints" is 29 REST routes + 1 WebSocket across
+`backend/app/api/routes/`.
+
+Render it either way:
+- **VS Code** — install the official *Draw.io Integration* extension
+  (`hediet.vscode-drawio`) and open the file; export PNG/SVG/PDF from there.
+- **Web** — drag the file onto [app.diagrams.net](https://app.diagrams.net).
+- **MCP (optional)** — the repo ships a `drawio` MCP server in `.mcp.json`
+  (`@drawio/mcp`, by JGraph Ltd) so an agent can regenerate these diagrams from
+  the live source; approve it via `/mcp` after a Claude Code restart.
 
 Five top-level moving parts:
 
