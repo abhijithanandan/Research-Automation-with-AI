@@ -127,6 +127,7 @@ python-Levenshtein==0.27.3
 python-multipart==0.0.29
 PyYAML==6.0.3
 radon==6.0.1
+rank-bm25==0.2.2
 RapidFuzz==3.14.5
 referencing==0.37.0
 requests==2.34.2
