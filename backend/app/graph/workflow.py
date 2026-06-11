@@ -1180,7 +1180,15 @@ async def create_postgres_checkpointer(
             conninfo=pg_url,
             max_size=5,
             open=False,
-            kwargs={"row_factory": dict_row},
+            # autocommit=True is REQUIRED: AsyncPostgresSaver.setup() issues a
+            # `CREATE INDEX CONCURRENTLY`, which Postgres forbids inside a
+            # transaction block. Without autocommit, setup() aborts with
+            # "CREATE INDEX CONCURRENTLY cannot run inside a transaction
+            # block" and the lifespan hook silently degrades to MemorySaver —
+            # so checkpoints never persist and a paused run can't survive a
+            # backend restart. (CodeRabbit flagged this; confirmed live as the
+            # cause of checkpointer_fallback_memory on every boot.)
+            kwargs={"row_factory": dict_row, "autocommit": True},
         ),
     )
     await _pool.open()
