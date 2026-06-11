@@ -14,8 +14,19 @@ EuropePMCAdapter._search_with_retry
 ArXivAdapter._search_with_retry
 CrossrefAdapter._search_with_retry
 CoreAdapter._search_with_retry
+# SemanticScholar is the 5th adapter of the identical family above (HTTP call
+# + status/Retry-After handling + heterogeneous response parse). Same rationale
+# as its four siblings; its waiver was simply missed when the others landed.
+SemanticScholarAdapter._search_with_retry
 
 # Reference formatter — flat conditional cascade over many paper-metadata
 # field permutations (DOI / arXiv id / SS id / Europe PMC id / pdf_url
 # fallback). Splitting into helpers makes it less readable, not more.
 _format_reference_entry
+
+# Phase-3 analysis-gate re-arm — one handler covering BOTH Phase-3 HITL
+# sub-gates (code-review vs results-review), distinguished by snapshot.next.
+# Rank D comes from the two-branch fan-out plus defensive isinstance() guards
+# over loosely-typed graph-state dicts; splitting the branches duplicates the
+# shared audit/persist scaffolding and reads worse.
+_handle_analysis_gate_pause

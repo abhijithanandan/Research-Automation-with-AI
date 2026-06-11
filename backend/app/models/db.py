@@ -154,6 +154,32 @@ class DatasetRow(Base):
     uploaded_at: Mapped[datetime] = mapped_column(_TS)
 
 
+class Bm25IndexRow(Base):
+    """Persisted BM25 sparse-retrieval corpus for the Critic's hybrid search.
+
+    One row per Chroma namespace (the namespace is ``str(project_id)``), so a
+    project's keyword index survives backend restarts and stays in sync with
+    the dense ChromaDB collection. We store the *raw* chunk texts (not a
+    pickled BM25 object): the in-memory ``BM25Okapi`` is rebuilt from tokens on
+    load (cheap), which keeps the column dialect-portable (JSON on sqlite in
+    tests, JSONB on Postgres) and avoids a `pickle.load` bandit finding.
+
+    `namespace` is a plain string PK with no FK to ``projects``: Chroma treats
+    namespaces as opaque strings (tests use ``"project-abc"``), and the row is
+    cleaned up explicitly when a project's vector data is cleared rather than
+    via cascade.
+
+    `corpus` shape: ``{"doc_ids": list[str], "doc_texts": list[str]}`` — the
+    two lists are positionally aligned.
+    """
+
+    __tablename__ = "bm25_index"
+
+    namespace: Mapped[str] = mapped_column(String, primary_key=True)
+    corpus: Mapped[dict[str, Any]] = mapped_column(JSON)
+    updated_at: Mapped[datetime] = mapped_column(_TS)
+
+
 class ArtifactRow(Base):
     __tablename__ = "artifacts"
     # Partial unique index: at most one manuscript per project. Section/

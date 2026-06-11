@@ -52,9 +52,23 @@ dependencies = [
     # stdlib xml.etree but rejects entity-expansion and external-entity
     # references on parse. bandit B314/B405 stop firing once this is in.
     "defusedxml>=0.7",
+    # Phase 2 hybrid search (Critic RAG): sparse BM25 retrieval fused with the
+    # existing ChromaDB dense search via Reciprocal Rank Fusion. rank-bm25 is
+    # pure-Python + numpy (numpy already arrives via chromadb), so it adds no
+    # heavy transitive weight. The heavyweight cross-encoder reranker is an
+    # OPTIONAL extra (see [rerank]) so the base image + default CI stay lean.
+    "rank-bm25>=0.2.2",
 ]
 
 [project.optional-dependencies]
+# Cross-encoder reranking (Critic hybrid search, stage 3). Pulls torch +
+# transformers (~2-3 GB) and downloads BAAI/bge-reranker-base (~1.1 GB) at
+# first use, so it is deliberately OUT of the core deps: install only on hosts
+# that set RERANK_ENABLED=true. The retrieval path degrades gracefully to
+# RRF-only when this extra is absent (see services/vector_store.py).
+rerank = [
+    "sentence-transformers>=3.0",
+]
 dev = [
     "ruff>=0.4",
     "mypy>=1.10",

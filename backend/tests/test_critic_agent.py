@@ -134,6 +134,11 @@ class _FakeVectorStore:
     async def query(self, namespace: str, query: str, k: int = 10) -> list[dict[str, object]]:
         return []
 
+    async def hybrid_reranked_search(
+        self, namespace: str, query: str, *, top_n: int | None = None
+    ) -> list[dict[str, object]]:
+        return []
+
 
 @pytest.mark.asyncio
 async def test_critic_matrix_contains_every_paper() -> None:
@@ -211,6 +216,11 @@ async def test_critic_survives_vector_store_unavailable() -> None:
             raise VectorStoreUnavailableError("chroma down")
 
         async def query(self, namespace: str, query: str, k: int = 10) -> list[dict[str, object]]:
+            raise VectorStoreUnavailableError("chroma down")
+
+        async def hybrid_reranked_search(
+            self, namespace: str, query: str, *, top_n: int | None = None
+        ) -> list[dict[str, object]]:
             raise VectorStoreUnavailableError("chroma down")
 
     papers = [_paper("alpha2024", "Alpha Paper")]

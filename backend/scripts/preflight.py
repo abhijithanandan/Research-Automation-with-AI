@@ -40,6 +40,12 @@ REQUIRED_MODULES: tuple[str, ...] = (
     "firebase_admin",
     "asyncpg",
     "psycopg",
+    # Phase 2 hybrid search — sparse BM25 retrieval (core dep). The
+    # cross-encoder reranker (sentence_transformers) is an OPTIONAL extra and
+    # is intentionally NOT listed here: default CI runs without it and the
+    # retrieval path degrades to RRF-only, so requiring it would wrongly fail
+    # preflight on a lean install.
+    "rank_bm25",
     # Dev / test
     "pytest",
     "pytest_asyncio",

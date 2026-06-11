@@ -332,7 +332,12 @@ class Critic(Agent[CriticInput, CriticOutput]):
         rag_block = ""
         if rag_available and papers:
             try:
-                hits = await self._vs.query(namespace=str(project_id), query=papers[0].title, k=3)
+                # Hybrid (BM25 + dense + RRF + optional rerank) when enabled;
+                # exactly the legacy dense top-3 when the flag is off. The
+                # prompt below is unchanged — only the fetch mechanism differs.
+                hits = await self._vs.hybrid_reranked_search(
+                    namespace=str(project_id), query=papers[0].title
+                )
                 if hits:
                     # W1-A1: RAG snippets are chunked from the same poisoned-
                     # paper-text source the abstract came from — wrap in <rag>
@@ -449,7 +454,9 @@ class Critic(Agent[CriticInput, CriticOutput]):
         rag_block = ""
         if rag_available:
             try:
-                hits = await self._vs.query(namespace=str(project_id), query=paper.title, k=3)
+                hits = await self._vs.hybrid_reranked_search(
+                    namespace=str(project_id), query=paper.title
+                )
                 if hits:
                     # W1-A1: RAG snippets are chunked from the same poisoned-
                     # paper-text source the abstract came from — wrap in <rag>
