@@ -29,6 +29,7 @@ import { connectProjectEvents, type ManagedSocket, type ServerEvent } from "@/li
 type View =
   | "idle"
   | "creating"
+  | "setup" // project created, awaiting optional dataset attach + Begin
   | "running"
   | "awaiting"
   | "synthesis"
@@ -402,9 +403,26 @@ export default function HomePage() {
             setError({ message: `WebSocket closed (code ${e.code}).`, kind: "network" });
         },
       });
-      await api.workflow.start(project.id, DEV_TOKEN);
-      setView("running");
-      setLogLines(["Project created. Librarian starting…"]);
+      // Phase-3 fix: do NOT auto-start the workflow here. start_workflow
+      // snapshots the project's datasets ONCE, at the very beginning, to
+      // decide whether the synthesis gate routes into Phase 3. If we start
+      // immediately the user has no window to attach a dataset, so Phase 3
+      // is always skipped. Land on the "setup" view instead — the user
+      // optionally uploads datasets, then clicks Begin (handleBeginWorkflow)
+      // which fires workflow.start with the datasets already in the DB.
+      setView("setup");
+    } catch (err) {
+      setError(describeError(err, "Failed to create project."));
+      setView("error");
+    }
+  }
+
+  async function handleBeginWorkflow() {
+    if (!ctx) return;
+    setView("running");
+    setLogLines(["Project created. Librarian starting…"]);
+    try {
+      await api.workflow.start(ctx.projectId, DEV_TOKEN);
     } catch (err) {
       setError(describeError(err, "Failed to start workflow."));
       setView("error");
@@ -624,6 +642,58 @@ export default function HomePage() {
             </div>
           )}
 
+          {/* ── SETUP (project created; optional dataset attach before start) ─ */}
+          {view === "setup" && ctx && (
+            <div className="max-w-2xl space-y-8 animate-fade-in">
+              <div>
+                <h2 className="font-display text-2xl font-bold text-foreground">
+                  {title || "New project"}
+                </h2>
+                <p className="mt-1 text-sm text-muted">
+                  Project created. Optionally attach a dataset for the Analyst
+                  (Phase 3), then begin discovery.
+                </p>
+              </div>
+
+              {/* Phase-3 datasets — attach BEFORE starting so the synthesis
+                  gate can route into Phase 3. start_workflow snapshots the
+                  project's datasets at run start; uploading later has no
+                  effect on routing. */}
+              <DatasetUploader
+                projectId={ctx.projectId}
+                token={DEV_TOKEN}
+                datasets={datasets}
+                onUploaded={(d) => setDatasets((cur) => [d, ...cur])}
+                onDeleted={(id) => setDatasets((cur) => cur.filter((x) => x.id !== id))}
+                locked={false}
+              />
+
+              <div className="border-l-2 border-primary-dim/40 pl-4 text-xs text-muted-foreground">
+                {datasets.length > 0 ? (
+                  <>
+                    {datasets.length} dataset{datasets.length !== 1 ? "s" : ""} attached.
+                    The Analyst will propose analysis code after Phase 2 (synthesis)
+                    is approved.
+                  </>
+                ) : (
+                  <>
+                    No dataset attached. The workflow will run Discovery → Synthesis
+                    → Drafting and skip Phase 3 (Analyst). You can still begin —
+                    a dataset is optional.
+                  </>
+                )}
+              </div>
+
+              <button
+                type="button"
+                onClick={() => void handleBeginWorkflow()}
+                className="rounded-md bg-primary px-5 py-2.5 text-sm font-semibold text-primary-foreground transition-all hover:bg-primary-hover hover:shadow-[0_0_20px_oklch(72%_0.20_155_/_0.35)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/60 active:scale-[0.98]"
+              >
+                Begin discovery
+              </button>
+            </div>
+          )}
+
           {/* ── RUNNING / BUSY ────────────────────────────────────────────── */}
           {(view === "running" || view === "busy") && (
             <div className="max-w-3xl space-y-6 animate-fade-in">
@@ -701,11 +771,12 @@ export default function HomePage() {
             <div className="max-w-4xl space-y-8 animate-fade-in">
               <AgentLog lines={logLines} endRef={logEndRef} />
 
-              {/* Phase-3 datasets: optional uploader. Datasets must be in place
-                  before the Analyst runs (which happens after Phase-2 approval).
-                  Phase-1 / Phase-2 awaiting is the canonical place to attach
-                  them — visible only while the pool is still open. */}
-              {ctx && (
+              {/* Phase-3 datasets: read-only here. Attachment happens on the
+                  pre-start "setup" view — start_workflow snapshots datasets at
+                  run start, so uploading after Discovery has begun has no
+                  effect on Phase-3 routing. Shown locked so the user can still
+                  see what they attached. */}
+              {ctx && datasets.length > 0 && (
                 <DatasetUploader
                   projectId={ctx.projectId}
                   token={DEV_TOKEN}
@@ -714,7 +785,7 @@ export default function HomePage() {
                   onDeleted={(id) =>
                     setDatasets((cur) => cur.filter((d) => d.id !== id))
                   }
-                  locked={false}
+                  locked
                 />
               )}
 
