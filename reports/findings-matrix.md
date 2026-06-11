@@ -70,6 +70,8 @@ No new findings. Existing posture:
 | D1 (was L3) | Low | `backend/.env.example` | Missing `UNPAYWALL_EMAIL`, `CROSSREF_MAILTO`, `CORE_API_KEY` | Fresh-clone discovery yield is lower than possible | None | Backend |
 | D2 (Step 6) | Medium | `backend/run_ci_local.sh` (target) | No CI gate enforces bandit + radon + npm-audit | Regressions slip in; baseline drifts | None | DX |
 | D3 (Step 6) | Medium | GitHub branch protection | No required-checks list on `main` | Anyone with push rights can merge through red | None | DX |
+| D4 (hybrid-search) | Low | `app/services/discovery.py:201` `SemanticScholarAdapter._search_with_retry` | Rank-D (CC 21) un-waived; the 4 identical sibling adapters were already waived, this one was missed | None (API surface-area complexity, not logic) | Backend — radon waiver added |
+| D5 (hybrid-search) | Low | `app/services/workflow.py:1495` `_handle_analysis_gate_pause` | Rank-D (CC 21+) two-branch Phase-3 HITL gate re-arm; defensive isinstance guards over graph-state dicts | None | Backend — radon waiver added; refactor candidate if a 3rd sub-gate is ever added |
 
 ## Counts
 

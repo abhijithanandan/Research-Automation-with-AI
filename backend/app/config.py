@@ -29,6 +29,25 @@ class Settings(BaseSettings):
     vector_db_url: str = "http://localhost:8001"
     vector_db_provider: Literal["chroma", "pinecone", "qdrant"] = "chroma"
 
+    # --- Hybrid search (Critic RAG, Phase 2) -------------------------------
+    # Master switch for the BM25 + dense + RRF retrieval path. Default OFF so
+    # the existing dense-only behaviour is unchanged until an operator opts in
+    # (Zero-Regression policy). When False, `hybrid_reranked_search` is exactly
+    # the legacy dense `query` and no BM25 corpus is built on upsert.
+    hybrid_search_enabled: bool = False
+    # How many candidates each retriever (dense, sparse) contributes to the
+    # fusion pool before reranking.
+    hybrid_dense_top_k: int = Field(default=30, ge=1, le=200)
+    # RRF constant — higher dampens the contribution of lower-ranked hits.
+    hybrid_rrf_k: int = Field(default=60, ge=1)
+    # Final number of chunks returned to the Critic after reranking.
+    hybrid_top_n: int = Field(default=6, ge=1, le=50)
+    # Cross-encoder reranking (stage 3). Requires the optional [rerank] extra
+    # (sentence-transformers). When True but the library/model is unavailable
+    # the path logs once and degrades to RRF-only — it never hard-fails.
+    rerank_enabled: bool = False
+    rerank_model: str = "BAAI/bge-reranker-base"
+
     firebase_project_id: str = ""
     firebase_credentials_path: str = ""
     firebase_credentials_json: str = ""
