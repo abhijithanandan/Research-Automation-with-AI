@@ -63,6 +63,8 @@ data/
 uploads/
 chroma_data/
 postgres_data/
+# Local test datasets dropped at repo root for manual Phase-3 runs
+/sample-dataset.csv
 
 # --- Logs ---
 *.log
