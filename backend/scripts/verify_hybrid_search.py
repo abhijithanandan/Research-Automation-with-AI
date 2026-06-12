@@ -15,12 +15,14 @@ import asyncio
 import uuid
 
 from app.config import get_settings
+from app.db.session import get_session
+from app.models.db import Bm25IndexRow
 from app.services import bm25_store
 from app.services.vector_store import ChromaVectorStore, get_reranker
 
 NS = f"verify-hybrid-{uuid.uuid4().hex[:8]}"
 
-DOCS = [
+DOCS: list[dict[str, object]] = [
     {
         "id": "d1",
         "text": "Deep convolutional neural networks for image classification on ImageNet.",
@@ -49,59 +51,64 @@ async def main() -> int:
     print(f"namespace: {NS}")
     print(f"chroma: {settings.vector_db_url} | db: {settings.database_url.split('@')[-1]}")
 
-    # 1. Upsert → writes BOTH the dense Chroma collection and the Postgres BM25 corpus.
-    await store.upsert(NS, DOCS)
-    print("upsert done (dense + sparse)")
+    try:
+        # 1. Upsert → writes BOTH the dense Chroma collection and the Postgres BM25 corpus.
+        await store.upsert(NS, DOCS)
+        print("upsert done (dense + sparse)")
 
-    # 2. BM25 corpus persisted in Postgres?
-    corpus = await bm25_store.load_corpus(NS)
-    results.append(
-        _check(
-            "BM25 corpus persisted to Postgres",
-            corpus is not None and sorted(corpus.doc_ids) == ["d1", "d2", "d3", "d4"],
-            f"ids={sorted(corpus.doc_ids) if corpus else None}",
+        # 2. BM25 corpus persisted in Postgres?
+        corpus = await bm25_store.load_corpus(NS)
+        results.append(
+            _check(
+                "BM25 corpus persisted to Postgres",
+                corpus is not None and sorted(corpus.doc_ids) == ["d1", "d2", "d3", "d4"],
+                f"ids={sorted(corpus.doc_ids) if corpus else None}",
+            )
         )
-    )
 
-    # 3. Hybrid search returns text-bearing candidates from the real path.
-    hits = await store.hybrid_reranked_search(NS, "rank fusion retrieval", top_n=4)
-    ids = [str(h["id"]) for h in hits]
-    results.append(_check("hybrid_reranked_search returns hits", len(hits) > 0, f"ids={ids}"))
-    results.append(
-        _check("every returned candidate carries text", all(str(h.get("text", "")) for h in hits))
-    )
-
-    # 4. The keyword-only doc (d3) — strong BM25 match for "rank fusion retrieval" — surfaces.
-    results.append(_check("BM25 keyword match (d3) present in fused pool", "d3" in ids))
-
-    # 5. Reranker degrades gracefully (optional [rerank] extra not installed here).
-    reranker = get_reranker()
-    results.append(
-        _check(
-            "reranker degrades to None without [rerank] extra",
-            reranker is None,
-            "RRF-only path (expected; install .[rerank] to enable cross-encoder)",
+        # 3. Hybrid search returns text-bearing candidates from the real path.
+        hits = await store.hybrid_reranked_search(NS, "rank fusion retrieval", top_n=4)
+        ids = [str(h["id"]) for h in hits]
+        results.append(_check("hybrid_reranked_search returns hits", len(hits) > 0, f"ids={ids}"))
+        results.append(
+            _check(
+                "every returned candidate carries text",
+                all(str(h.get("text", "")) for h in hits),
+            )
         )
-    )
 
-    # 6. Flag OFF → identical to legacy dense query (zero-regression).
-    settings.hybrid_search_enabled = False
-    legacy = await store.hybrid_reranked_search(NS, "rank fusion retrieval")
-    results.append(
-        _check(
-            "flag OFF == legacy dense top-3",
-            len(legacy) <= 3 and all("fused_score" not in h for h in legacy),
-            f"n={len(legacy)}",
+        # 4. The keyword-only doc (d3) — strong BM25 match for "rank fusion retrieval" — surfaces.
+        results.append(_check("BM25 keyword match (d3) present in fused pool", "d3" in ids))
+
+        # 5. Reranker degrades gracefully (optional [rerank] extra not installed here).
+        reranker = get_reranker()
+        results.append(
+            _check(
+                "reranker degrades to None without [rerank] extra",
+                reranker is None,
+                "RRF-only path (expected; install .[rerank] to enable cross-encoder)",
+            )
         )
-    )
 
-    # Cleanup the probe namespace's BM25 row (leave Chroma collection; harmless).
-    async with __import__("app.db.session", fromlist=["get_session"]).get_session() as s:
-        from app.models.db import Bm25IndexRow
-
-        row = await s.get(Bm25IndexRow, NS)
-        if row is not None:
-            await s.delete(row)
+        # 6. Flag OFF → identical to legacy dense query (zero-regression).
+        settings.hybrid_search_enabled = False
+        legacy = await store.hybrid_reranked_search(NS, "rank fusion retrieval")
+        results.append(
+            _check(
+                "flag OFF == legacy dense top-3",
+                len(legacy) <= 3 and all("fused_score" not in h for h in legacy),
+                f"n={len(legacy)}",
+            )
+        )
+    finally:
+        # Cleanup the probe namespace's BM25 row even when a check raises
+        # (leave the Chroma collection; harmless). get_session() owns the
+        # commit on clean exit — no bare session.commit() per the
+        # transaction-ownership contract in app/db/session.py.
+        async with get_session() as s:
+            row = await s.get(Bm25IndexRow, NS)
+            if row is not None:
+                await s.delete(row)
 
     passed = sum(results)
     print(f"\n{passed}/{len(results)} checks passed")
