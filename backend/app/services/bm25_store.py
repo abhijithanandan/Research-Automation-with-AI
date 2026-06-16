@@ -83,10 +83,12 @@ async def upsert_documents(
 
     Returns the merged corpus. A namespace with no prior row is created. The
     write is an ``INSERT ... ON CONFLICT DO UPDATE`` so concurrent upserts for
-    different namespaces never collide and a re-run replaces cleanly.
+    different namespaces never collide. Within the same namespace the row-level
+    lock (``with_for_update=True``) ensures the read-modify-write is atomic —
+    the second writer waits for the first to commit before reading the baseline.
     """
     async with get_session() as session:
-        existing_row = await session.get(Bm25IndexRow, namespace)
+        existing_row = await session.get(Bm25IndexRow, namespace, with_for_update=True)
         existing = (
             Bm25Corpus.model_validate(existing_row.corpus)
             if existing_row is not None
